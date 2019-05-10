@@ -28,6 +28,79 @@ struct device_data {
 
 static struct device_data devices[DEVICES_LIMIT];
 
+struct context {
+    /* TODO */
+};
+
+static struct file_operations buffer_ops = {
+    /* TODO */
+};
+
+static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
+    int err, fd;
+    struct doomdev2_ioctl_create_surface params;
+    struct fd sfd;
+
+    if ((err = copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface)))) {
+        DEBUG("create surface copy_from_user fail");
+        return err;
+    }
+
+    DEBUG("create_surface: %u, %u", (unsigned)params.width, (unsigned)params.height);
+    if (params.width < 64 || params.width > 2048 || params.width % 64 != 0
+            || params.height < 1 || params.height > 2048) {
+        return -EINVAL;
+    }
+
+    /* TODO alloc buffer */
+    void* buff;
+
+    fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
+    if (fd < 0) {
+        DEBUG("create surface: failed to get fd, %d" fd);
+        return fd;
+    }
+
+    sfd = fdget(fd);
+    /* TODO: need to do anything else? */
+    sfd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+
+    return fd;
+}
+
+static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
+}
+
+static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
+}
+
+static int doom_open(struct inode* inode, struct file* file) {
+    /* TODO */
+    /* TODO allocate context */
+}
+
+static int doom_release(struct inode* inode, struct file* file) {
+    /* TODO */
+}
+
+static int doom_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
+    /* TODO */
+    switch (cmd) {
+    case DOOMDEV2_IOCTL_CREATE_SURFACE:
+        return create_surface(ctx, (struct doomdev2_ioctl_create_surface __user*)arg);
+    case DOOMDEV2_IOCTL_CREATE_BUFFER:
+        return create_buffer(ctx, (struct doomdev2_ioctl_create_buffer __user*)arg);
+    case DOOMDEV2_IOCTL_SETUP:
+        return setup(ctx, (struct doomdev2_ioctl_setup __user*)arg);
+    }
+
+    return -ENOTTY;
+}
+
+static ssize_t doom_write(struct file* file, const char __user* buf, size_t count, loff_t* off) {
+    /* TODO */
+}
+
 static struct file_operations doom_ops = {
     .owner = THIS_MODULE,
     .open = doom_open,
@@ -52,11 +125,21 @@ int alloc_dev_number() {
     return ret;
 }
 
+irqreturn_t doom_irq_handler(int irq, void* dev) {
+    /* TODO */
+    struct device_data* data = dev;
+    if (!dev) {
+        ERROR("No data in irq_handler!");
+        BUG();
+    }
+}
+
 static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
     int err = 0;
     void __iomem bar* = NULL;
     struct device* device = NULL;
     struct device_data* data = NULL;
+    int dev_number = DEVICE_LIMIT;
 
     DEBUG("probe called: %#010x, %#0x10x", id->vendor, id->device);
 
@@ -127,10 +210,15 @@ static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
         goto err_device;
     }
 
-    /* TODO interrupt handling */
+    if ((err = request_irq(dev->irq, doom_irq_handler, IRQF_SHARED, CHRDEV_NAME, data))) {
+        DEBUG("can't setup interrupt handler");
+        goto err_irq;
+    }
 
     return 0;
 
+err_irq:
+    device_destroy(&doom_class, doom_major + dev_number);
 err_device:
     cdev_del(&data->cdev);
 out_cdev_add:
@@ -154,6 +242,7 @@ static void pci_remove(struct pci_dev* dev) {
     if (!data) {
         ERROR("pci_remove: no pcidata!");
     } else {
+        free_irq(dev->irq, data);
         device_destroy(&doom_class, doom_major + data->number);
         cdev_del(&data->cdev);
         bar = data->bar;
@@ -197,22 +286,6 @@ static const struct pci_driver pci_drv = {
 };
 
 static dev_t doom_major;
-
-static int doom_open(struct inode* inode, struct file* file) {
-    /* TODO */
-}
-
-static int doom_release(struct inode* inode, struct file* file) {
-    /* TODO */
-}
-
-static int doom_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
-    /* TODO */
-}
-
-static ssize_t doom_write(struct file* file, const char __user *buf, size_t count, loff_t* off) {
-    /* TODO */
-}
 
 static int hd2_init(void)
 {
