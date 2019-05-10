@@ -9,6 +9,7 @@ MODULE_LICENSE("GPL");
 #define DRV_NANE "harddoom2_driver"
 #define CHRDEV_NAME "doom"
 #define DEVICES_LIMIT 256
+#define MAX_KMALLOC (128 * 1024)
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },
@@ -30,20 +31,30 @@ static struct device_data devices[DEVICES_LIMIT];
 
 struct context {
     /* TODO */
+    struct device_data* devdata;
 };
+
+struct context* get_ctx(struct file* file) {
+    if (!file->private_data) {
+        ERROR("OOPS, file private data NULL");
+        return -EFAULT;
+    }
+
+    return (struct context*)file->private_data;
+}
 
 static struct file_operations buffer_ops = {
     /* TODO */
 };
 
 static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
-    int err, fd;
+    int fd;
     struct doomdev2_ioctl_create_surface params;
     struct fd sfd;
 
-    if ((err = copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface)))) {
+    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
         DEBUG("create surface copy_from_user fail");
-        return err;
+        return -EFAULT;
     }
 
     DEBUG("create_surface: %u, %u", (unsigned)params.width, (unsigned)params.height);
@@ -58,13 +69,17 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
     fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
     if (fd < 0) {
         DEBUG("create surface: failed to get fd, %d" fd);
-        return fd;
+        goto out_getfd;
     }
 
     sfd = fdget(fd);
     /* TODO: need to do anything else? */
     sfd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
 
+    return fd;
+
+out_getfd:
+    /* TODO free buffer */
     return fd;
 }
 
@@ -76,7 +91,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
 
 static int doom_open(struct inode* inode, struct file* file) {
     /* TODO */
-    /* TODO allocate context */
+    /* TODO allocate context, get device_data */
 }
 
 static int doom_release(struct inode* inode, struct file* file) {
@@ -97,8 +112,89 @@ static int doom_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
     return -ENOTTY;
 }
 
-static ssize_t doom_write(struct file* file, const char __user* buf, size_t count, loff_t* off) {
+static ssize_t doom_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
     /* TODO */
+    struct doomdev2_cmd* cmds, curr;
+    struct context* ctx;
+    struct hd_buffer* cmd_buf;
+    size_t num_cmds, it;
+    int free_cmds;
+    char* buf;
+    int err;
+
+    ctx = get_context(file);
+    if (IS_ERR(ctx)) { ERROR("doom_write ctx"); return PTR_ERR(ctx); }
+    cmd_buf = ctx->cmd_buf;
+
+    if (count % sizeof(doomdev2_cmd) != 0) {
+        DEBUG("doom_write: wrong count %llu", count);
+        return -EINVAL;
+    }
+
+    if (count > MAX_KMALLOC) {
+        count = MAX_KMALLOC;
+    }
+
+    _Static_assert(sizeof(struct doomdev2_cmd) % MAX_KMALLOC == 0, "cmd size mismatch");
+
+    buf = kmalloc(count, GFP_KERNEL);
+    if (!buf) {
+        DEBUG("doom_write: kmalloc fail");
+        return -ENOMEM;
+    }
+
+    if (copy_from_user(buf, _buf, count)) {
+        DEBUG("doom_write: copy from user fail");
+        err = -EFAULT;
+        goto out_copy;
+    }
+
+    num_cmds = count / sizeof(doomdev2_cmd);
+    cmds = (struct doomdev2_cmd*)buf;
+
+    write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
+    read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
+    free_cmds = read_idx - write_idx - 1; /* TODO is this correct? */
+    if (free_cmds < 0) free_cmds += CMD_BUF_SIZE;
+    if (free_cmds < 0 || free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); err = -EFAULT; goto out_copy; }
+
+    if (free_cmds == 0) {
+        /* TODO wait instead */
+        DEBUG("doom_write: no space in queue");
+        err = -EAGAIN;
+        goto out_copy;
+    }
+
+    if (num_cmds > free_cmds) {
+        num_cmds = free_cmds;
+    }
+
+    for (it = 0; it < num_cmds; ++it) {
+        curr = cmds[it];
+        switch (curr->type) {
+        case DOOMDEV2_CMD_TYPE_FILL_RECT:
+            break;
+        case DOOMDEV2_CMD_TYPE_DRAW_LINE:
+            break;
+        default:
+            /* TODO */
+            break;
+        }
+    }
+
+    if (it == 0) {
+        /* TODO something failed */
+    }
+
+    write_idx = (write_idx + num_cmds) % CMD_BUF_SIZE;
+    iowrite32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
+
+    kfree(buf);
+    return it * sizeof(struct doomdev2_cmd);
+
+out_copy:
+    kfree(buf);
+    return err;
 }
 
 static struct file_operations doom_ops = {
