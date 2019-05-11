@@ -37,10 +37,50 @@ struct buffer {
 };
 
 int init_buffer(struct buffer* buff, struct device* dev, size_t size) {
+    if (size > MAX_BUFFER_SIZE) { ERROR("bad init_buffer"); return -EINVAL; }
+
+    buff->page_table_kern = dma_alloc_coherent(dev, PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
+    if (!buff->page_table_kern) {
+        DEBUG("init_buffer: page_table_kern");
+        goto out_table;
+    }
+
+    uint32_t* page_table = (uint32_t*)buff->page_table_kern;
+
+    size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t page;
+    for (page = 0; page < num_pages; ++page) {
+        void* buff->pages_kern[page] = dma_alloc_coherent(dev, PAGE_SIZE, &buff->pages_dev[page], GFP_KERNEL);
+        if (!page_kern) {
+            DEBUG("init_buffer: page_kern");
+            goto out_pages;
+        }
+
+        page_table[page] = (uint32_t)(buff->pages_dev[page] >> 4) | 3; /* TODO: think about this */
+    }
+
+    buff->size = size;
+
+    return 0;
+
+out_pages:
+    num_pages = page;
+    for (page = 0; page < num_pages; ++page) {
+        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+    }
+
+out_table:
+    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
+
+    return -ENOMEM;
+}
+
+void free_buffer(struct buffer* buff, struct device* dev) {
+    /* TODO */
 }
 
 int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
-    if (dst_pos >= buff->size || size >= buff->size || dst_pos + size >= buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
+    if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
 
     size_t page = dst_pos / PAGE_SIZE;
     size_t page_off = dst_pos % PAGE_SIZE;
@@ -81,6 +121,8 @@ struct context {
     /* TODO */
     struct device_data* devdata;
     struct surface dst_surface;
+
+    /* TODO: map surface fds to struct surfaces */
 };
 
 struct context* get_ctx(struct file* file) {
@@ -97,6 +139,7 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
     int fd;
     struct doomdev2_ioctl_create_surface params;
     struct fd sfd;
+    int err;
 
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
         DEBUG("create surface copy_from_user fail");
@@ -109,31 +152,80 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         return -EINVAL;
     }
 
-    /* TODO alloc buffer */
-    void* buff;
+    struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
+    if (!buff) {
+        return -ENOMEM;
+    }
+
+    struct pci_dev* pdev; /*TODO: how to get pci_dev from ctx? */
+    if ((err = init_buffer(buff, &pdev->dev, params.width * params.height))) {
+        DEBUG("create_surface: init_buffer");
+        goto out_buff;
+    }
 
     fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
     if (fd < 0) {
         DEBUG("create surface: failed to get fd, %d" fd);
+        err = fd;
         goto out_getfd;
     }
 
     sfd = fdget(fd);
     /* TODO: need to do anything else? */
     sfd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+    sfd.file->private_data = buff;
 
     return fd;
 
 out_getfd:
-    /* TODO free buffer */
-    return fd;
+    free_buff(buff, &pdev->dev);
+
+out_buff:
+    kfree(buff);
+    return err;
 }
 
 static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
 }
 
+int verify_buff_fd(int32_t fd) {
+    /* TODO */
+}
+
+struct surface surface_from_fd(struct context* ctx, int32_t fd) {
+    /* TODO */
+}
+
 static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
     /* TODO setup dst surface params if needed */
+    struct doomdev_2_ioctl_setup params;
+
+    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_setup))) {
+        DEBUG("setup copy_from_user fail");
+        return -EFAULT;
+    }
+
+    DEBUG("setup");
+    /* TODO verify fds */
+
+    uint32_t bufs_mask = 0;
+    if (params.surf_dst_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_SURF_DST;
+    if (params.surf_src_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC;
+    if (params.texture_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TEXTURE;
+    if (params.flat_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_FLAT;
+    if (params.colormap_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_COLORMAP;
+    if (params.translation_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION;
+    if (params.tranmap_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TRANMAP;
+
+    /* set dst_surf in ctx? */
+    struct surface dst_surf = surface_from_fd(ctx, params.surf_dst_fd);
+    struct surface src_surf = surface_from_fd(ctx, params.surf_src_fd);
+
+    struct cmd hdcmd = {
+        .data = {
+            HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_surf.width, src_surf.width),
+        }
+    };
 }
 
 static int doom_open(struct inode* inode, struct file* file) {
