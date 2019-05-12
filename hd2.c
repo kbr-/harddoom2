@@ -26,6 +26,7 @@ static struct class doom_class = {
     .owner = THIS_MODULE,
 };
 
+/* TODO: add some refcounter to indicate being used by cmds */
 struct buffer {
     void* pages_kern[1024];
     dma_addr_t pages_dev[1024];
@@ -76,7 +77,13 @@ out_table:
 }
 
 void free_buffer(struct buffer* buff, struct device* dev) {
-    /* TODO */
+    size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t page;
+    for (page = 0; page < num_pages; ++page) {
+        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+    }
+
+    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
 }
 
 int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
@@ -97,6 +104,37 @@ int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
         size -= space_in_page;
 
         dst = pages_kern[++page];
+        space_in_page = PAGE_SIZE;
+    }
+
+    return 0;
+}
+
+int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size_t size, size_t* bytes_transferred) {
+    if (src_pos >= buff->size || size > buff->size || src_pos + size > buff->size) { ERROR("bad read_buffer!"); return -EINVAL; }
+
+    size_t page = src_pos / PAGE_SIZE;
+    size_t page_off = src_pos % PAGE_SIZE;
+    size_t space_in_page = PAGE_SIZE - page_off;
+    void* src = pages_kern[page] + page_off;
+    *bytes_transferred = 0;
+
+    while (size) {
+        if (space_in_page > size) {
+            space_in_page = size;
+        }
+
+        unsigned long left = copy_to_user(dst, src, space_in_page);
+        *bytes_transferred += (space_in_page - left);
+        if (left) {
+            DEBUG("read_buffer_user: copy_to_user fail");
+            return -EFAULT;
+        }
+
+        dst += space_in_page;
+        size -= space_in_page;
+
+        src = pages_kern[++page];
         space_in_page = PAGE_SIZE;
     }
 
@@ -126,21 +164,98 @@ struct context {
 };
 
 struct context* get_ctx(struct file* file) {
-    if (!file->private_data) { ERROR("OOPS, file private data NULL"); return -EFAULT; }
+    if (!file) { ERROR("get_ctx: file NULL"); return -EINVAL; }
+    if (!file->private_data) { ERROR("get_ctx: file private data NULL"); return -EINVAL; }
+    if (file->f_ops != doom_ops) { ERROR("get_ctx: wrong fops"); return -EINVAL; }
 
     return (struct context*)file->private_data;
 }
 
-static struct file_operations buffer_ops = {
+static int buffer_open(struct inode* inode, struct file* file) {
+    /* TODO: is this necessary? */
+}
+
+static int buffer_release(struct inode* inode, struct file* file) {
+    /* TODO: is this necessary? (release by doom chrdev instead) */
+}
+
+static ssize_t buffer_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
     /* TODO */
+}
+
+static ssize_t buffer_read(struct file* file, char __user *_buff, size_t count, loff_t* off) {
+    struct buffer* buff = file->private_data;
+    if (!buff) { ERROR("llseek: no buff!"); return -EINVAL; }
+    if (file->f_op != buffer_ops) { ERROR("llseek: wrong fops"); return -EINVAL; }
+
+    if (*off < 0) {
+        return -EINVAL;
+    }
+
+    if (*off >= buff->size) {
+        return 0;
+    }
+
+    if (count > buff->size - *off) {
+        count = buff_size - *off;
+    }
+
+    if (!count) {
+        return -EINVAL;
+    }
+
+    /* TODO: wait for ops */
+
+    size_t ret = 0;
+    int err = read_buffer_user(buff, _buff, *off, count, &ret);
+    *off += ret;
+
+    if (err && !ret) {
+        return err;
+    }
+
+    if (!ret) { ERROR("buffer_read: OOPS, !ret"); return -EINVAL; }
+
+    return ret;
+}
+
+static loff_t buffer_llseek(struct file* file, loff_t off, int whence) {
+    struct buffer* buff = file->private_data;
+    if (!buff) { ERROR("llseek: no buff!"); return -EINVAL; }
+    if (file->f_op != buffer_ops) { ERROR("llseek: wrong fops"); return -EINVAL; }
+    if (file->f_pos < 0 || file->f_pos >= buff->size) { ERROR("OOPS: wrong fpos!"); return -EINVAL; }
+
+    if (whence == SEEK_CUR) {
+        off += file->f_pos;
+    } else if (whence == SEEK_END) {
+        off += buff->size;
+    } else if (whence != SEEK_SET) {
+        DEBUG("llseek: wrong whence");
+        return -EINVAL;
+    }
+
+    if (off < 0 || off >= buff->size) {
+        DEBUG("llseek: SEEK_SET: out of bounds");
+        return -EINVAL;
+    }
+
+    file->f_pos = off;
+    return off;
+}
+
+static struct file_operations buffer_ops = {
+    .owner = THIS_MODULE,
+    .open = buffer_open,
+    .release = buffer_release,
+    .write = buffer_write,
+    .read = buffer_read,
+    .llseek = buffer_llseek
 };
 
 static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
-    int fd;
-    struct doomdev2_ioctl_create_surface params;
-    struct fd sfd;
     int err;
 
+    struct doomdev2_ioctl_create_surface params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
         DEBUG("create surface copy_from_user fail");
         return -EFAULT;
@@ -163,19 +278,19 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         goto out_buff;
     }
 
-    fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
-    if (fd < 0) {
-        DEBUG("create surface: failed to get fd, %d" fd);
-        err = fd;
+    int _fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
+    if (_fd < 0) {
+        DEBUG("create surface: failed to get fd, %d" _fd);
+        err = _fd;
         goto out_getfd;
     }
 
-    sfd = fdget(fd);
-    /* TODO: need to do anything else? */
-    sfd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
-    sfd.file->private_data = buff;
+    struct fd fd = fdget(_fd);
+    /* TODO: need to do anything else? fdput? */
+    fd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+    fd.file->private_data = buff;
 
-    return fd;
+    return _fd;
 
 out_getfd:
     free_buff(buff, &pdev->dev);
@@ -196,7 +311,34 @@ struct surface surface_from_fd(struct context* ctx, int32_t fd) {
     /* TODO */
 }
 
+dma_addr_t page_table_addr_from_fd(struct context* ctx, int32_t _fd) {
+    struct fd fd = fdget(_fd);
+    struct buffer* buff = fd.file->private_data;
+    return buff->page_table_dev;
+}
+
+int wait_for_cmd_buffer(unsigned* write_idx, ssize_t* free_cmds) {
+    /* TODO synchronization */
+    *write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
+    ssize_t read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
+
+    *free_cmds = read_idx - write_idx - 1; /* TODO is this correct? */
+    if (free_cmds < 0) free_cmds += CMD_BUF_SIZE;
+
+    if (free_cmds < 0 || free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); return -EINVAL; }
+
+    if (free_cmds == 0) {
+        DEBUG("doom_write: no space in queue");
+        /* TODO wait */
+    }
+
+    /* TODO set free_cmds */
+
+    return 0;
+}
+
 static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
+    /* TODO optimize: don't send setup if it wouldn't do anything */
     /* TODO setup dst surface params if needed */
     struct doomdev_2_ioctl_setup params;
 
@@ -221,11 +363,33 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     struct surface dst_surf = surface_from_fd(ctx, params.surf_dst_fd);
     struct surface src_surf = surface_from_fd(ctx, params.surf_src_fd);
 
-    struct cmd hdcmd = {
+    struct cmd hd_cmd = {
         .data = {
             HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_surf.width, src_surf.width),
+            params.surf_dst_fd != -1 ? (page_table_addr_from_fd(params.surf_dst_fd) >> 8) : 0,
+            params.surf_src_fd != -1 ? (page_table_addr_from_fd(params.surf_src_fd) >> 8) : 0,
+            params.texture_fd != -1 ? (page_table_addr_from_fd(params.texture_fd) >> 8) : 0,
+            params.flat_fd != -1 ? (page_table_addr_from_fd(params.flat_fd) >> 8) : 0,
+            params.colormap_fd != -1 ? (page_table_addr_from_fd(params.colormap_fd) >> 8) : 0,
+            params.translation_fd != -1 ? (page_table_addr_from_fd(params.translation_fd) >> 8) : 0,
+            params.tranmap_fd != -1 ? (page_table_addr_from_fd(params.tranmap_fd) >> 8) : 0
         }
     };
+
+    int err;
+    unsigned write_idx;
+    {
+        ssize_t free_cmds;
+        if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
+            return err;
+        }
+    }
+
+    if ((err = write_cmd(ctx, &hd_cmd, write_idx))) {
+        return err;
+    }
+
+    return 0;
 }
 
 static int doom_open(struct inode* inode, struct file* file) {
@@ -255,12 +419,16 @@ struct cmd {
     uint32_t data[8];
 };
 
-int write_cmd(struct buffer* cmd_buff, struct cmd* cmd, size_t write_idx) {
+int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
     if (write_idx >= CMD_BUF_SIZE) { ERROR("write_cmd wrong write_idx! %llu", write_idx); return -EINVAL; }
-    if (cmd_buff->size != CMD_BUF_SIZE) { ERROR("wrong cmd_buff size?!"); return -EINVAL; }
+    if (!ctx->devdata) { ERROR("write_cmd no device!"); return -EINVAL; }
+    if (!ctx->devdata->cmd_buff) { ERROR("write_cmd no cmd_buff!"); return -EINVAL; }
+
+    struct buffer* buff = &ctx->devdata->cmd_buff;
+    if (buff->size != CMD_BUF_SIZE) { ERROR("wrong cmd_buff size?!"); return -EINVAL; }
 
     size_t dst_pos = write_idx * 8;
-    return write_buffer(cmd_buff, cmd->data, dst_pos, 8*4);
+    return write_buffer(buff, cmd->data, dst_pos, 8*4);
 }
 
 static ssize_t doom_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
@@ -303,17 +471,9 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     num_cmds = count / sizeof(doomdev2_cmd);
     cmds = (struct doomdev2_cmd*)buf;
 
-    /* TODO synchronization */
-    write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
-    read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
-    free_cmds = read_idx - write_idx - 1; /* TODO is this correct? */
-    if (free_cmds < 0) free_cmds += CMD_BUF_SIZE;
-    if (free_cmds < 0 || free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); err = -EFAULT; goto out_copy; }
-
-    if (free_cmds == 0) {
-        /* TODO wait instead */
-        DEBUG("doom_write: no space in queue");
-        err = -EAGAIN;
+    unsigned write_idx;
+    ssize_t free_cmds;
+    if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
         goto out_copy;
     }
 
@@ -344,7 +504,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
                     0
                 }
             };
-            if ((err = write_cmd(&ctx->devdata->cmd_buff, &hd_cmd, write_idx))) return err;
+            if ((err = write_cmd(ctx, &hd_cmd, write_idx))) return err;
             break;
         }
         case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
@@ -366,7 +526,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
                     0
                 }
             };
-            if ((err = write_cmd(&ctx->devdata->cmd_buff, &hd_cmd, write_idx))) return err;
+            if ((err = write_cmd(ctx, &hd_cmd, write_idx))) return err;
             break;
         }
         default:
