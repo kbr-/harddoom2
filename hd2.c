@@ -27,6 +27,7 @@ static struct class doom_class = {
 };
 
 /* TODO: add some refcounter to indicate being used by cmds */
+/* TODO: how to free this safely? */
 struct buffer {
     void* pages_kern[1024];
     dma_addr_t pages_dev[1024];
@@ -187,18 +188,38 @@ struct surface {
     uint16_t height;
 };
 
+/* Map FDs representing surface buffers to the surfaces */
+struct fd_to_surface {
+    int fd;
+    struct surface surf;
+
+    struct list_head node;
+}
+
 struct context {
     /* TODO */
     struct device_data* devdata;
-    struct surface dst_surface;
+    struct surface* dst_surf;
 
-    /* TODO: map surface fds to struct surfaces */
+    struct list_head surf_list;
+    /* TODO: should fd refs be stored so that buffers don't get freed prematurely? */
 };
 
+struct surface* fd_to_surface(struct context* ctx, int32_t fd) {
+    struct list_head* pos;
+    list_for_each(pos, &ctx->surf_list) {
+        struct fd_to_surface* entry = list_entry(pos, struct fd_to_surface, node);
+        if (entry->fd == fd) {
+            return &entry->surf;
+        }
+    }
+    return NULL;
+}
+
 struct context* get_ctx(struct file* file) {
-    if (!file) { ERROR("get_ctx: file NULL"); return -EINVAL; }
-    if (!file->private_data) { ERROR("get_ctx: file private data NULL"); return -EINVAL; }
-    if (file->f_ops != doom_ops) { ERROR("get_ctx: wrong fops"); return -EINVAL; }
+    if (!file) { ERROR("get_ctx: file NULL"); return ERR_PTR(-EINVAL); }
+    if (!file->private_data) { ERROR("get_ctx: file private data NULL"); return ERR_PTR(-EINVAL); }
+    if (file->f_ops != doom_ops) { ERROR("get_ctx: wrong fops"); return ERR_PTR(-EINVAL); }
 
     return (struct context*)file->private_data;
 }
@@ -319,18 +340,19 @@ static struct file_operations buffer_ops = {
 };
 
 int make_buffer_file(struct buffer* buff, const char* class) { /* TODO: is this class needed? */
-    int _fd = anon_inode_getfd(class, buffer_ops, buff, O_RDWR | O_CREAT);
-    if (_fd < 0) {
-        return _fd;
+    int fd = anon_inode_getfd(class, buffer_ops, buff, O_RDWR | O_CREAT);
+    if (fd < 0) {
+        return fd;
     }
 
-    struct fd fd = fdget(_fd);
-    /* TODO: need to do anything else? fdput? */
-    /* TODO: better use anon_inode_getfile, set f_mode, then install fd... */
-    fd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
-    fd.file->private_data = buff;
+    struct fd f = fdget(fd);
+    /* TODO: better use anon_inode_getfile, set f_mode, then install fd... ? */
+    f.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+    f.file->private_data = buff;
+    /* TODO: need to do anything else? */
+    fdput(f);
 
-    return _fd;
+    return fd;
 }
 
 struct pci_dev* get_pci_dev(struct context* ctx) {
@@ -339,6 +361,7 @@ struct pci_dev* get_pci_dev(struct context* ctx) {
 
 static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
     int err;
+    /* TODO: store in context */
 
     struct doomdev2_ioctl_create_surface params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
@@ -422,21 +445,14 @@ out_buff:
     return err;
 }
 
-int verify_buff_fd(int32_t fd) {
-    /* TODO */
-}
-
-struct surface surface_from_fd(struct context* ctx, int32_t fd) {
-    /* TODO */
-}
-
-dma_addr_t page_table_addr_from_fd(struct context* ctx, int32_t _fd) {
-    struct fd fd = fdget(_fd);
-    struct buffer* buff = fd.file->private_data;
+dma_addr_t page_table_addr_from_fd(struct context* ctx, int32_t fd) {
+    struct fd f = fdget(fd);
+    struct buffer* buff = f.file->private_data;
+    fdput(f);
     return buff->page_table_dev;
 }
 
-int wait_for_cmd_buffer(unsigned* write_idx, ssize_t* free_cmds) {
+int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_cmds) {
     /* TODO synchronization */
     *write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
     ssize_t read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
@@ -451,49 +467,69 @@ int wait_for_cmd_buffer(unsigned* write_idx, ssize_t* free_cmds) {
         /* TODO wait */
     }
 
-    /* TODO set free_cmds */
+    /* TODO set free_cmds after waiting */
 
     return 0;
 }
 
 static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
+    static const uint32_t flags[7] = { HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
+        HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
+        HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
+
     /* TODO optimize: don't send setup if it wouldn't do anything */
-    /* TODO setup dst surface params if needed */
     struct doomdev_2_ioctl_setup params;
+
+    DEBUG("setup");
 
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_setup))) {
         DEBUG("setup copy_from_user fail");
         return -EFAULT;
     }
 
-    DEBUG("setup");
-    /* TODO verify fds */
+    int32_t fds[7] = { params.surf_dst_fd, params.surf_src_fd, params.texture_fd,
+        params.flat_fd, params.colormap_fd, params.translation_fd, params.tranmap_fd };
 
     uint32_t bufs_mask = 0;
-    if (params.surf_dst_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_SURF_DST;
-    if (params.surf_src_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC;
-    if (params.texture_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TEXTURE;
-    if (params.flat_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_FLAT;
-    if (params.colormap_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_COLORMAP;
-    if (params.translation_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION;
-    if (params.tranmap_fd != -1) bufs_mask |= HARDDOOM2_CMD_FLAG_SETUP_TRANMAP;
 
-    /* set dst_surf in ctx? */
-    struct surface dst_surf = surface_from_fd(ctx, params.surf_dst_fd);
-    struct surface src_surf = surface_from_fd(ctx, params.surf_src_fd);
+    for (int i = 0; i < 7; ++i) {
+        if (fds[i] == -1) continue;
 
-    struct cmd hd_cmd = {
-        .data = {
-            HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_surf.width, src_surf.width),
-            params.surf_dst_fd != -1 ? (page_table_addr_from_fd(params.surf_dst_fd) >> 8) : 0,
-            params.surf_src_fd != -1 ? (page_table_addr_from_fd(params.surf_src_fd) >> 8) : 0,
-            params.texture_fd != -1 ? (page_table_addr_from_fd(params.texture_fd) >> 8) : 0,
-            params.flat_fd != -1 ? (page_table_addr_from_fd(params.flat_fd) >> 8) : 0,
-            params.colormap_fd != -1 ? (page_table_addr_from_fd(params.colormap_fd) >> 8) : 0,
-            params.translation_fd != -1 ? (page_table_addr_from_fd(params.translation_fd) >> 8) : 0,
-            params.tranmap_fd != -1 ? (page_table_addr_from_fd(params.tranmap_fd) >> 8) : 0
+        struct fd f = fdget(fds[i]);
+        if (!f.file) {
+            DEBUG("setup: fd no file");
+            return -EINVAL;
         }
-    };
+        if (f.file->f_op != buffer_ops) {
+            DEBUG("setup: fd wrong file");
+            return -EINVAL;
+        }
+
+        bufs_mask |= flags[i];
+    }
+
+    struct surface* dst_surf = NULL, src_surf = NULL;
+    if (params.surf_dst_fd != -1) {
+        struct surface* dst_surf = fd_to_surface(ctx, params.surf_dst_fd);
+        if (!dst_surf) {
+            DEBUG("setup: given surf_dst_fd doesn't match any allocated surface");
+            return -EINVAL;
+        }
+    }
+    if (params.surc_src_fd != -1) {
+        struct surface* src_surf = fd_to_surface(ctx, params.surf_src_fd);
+        if (!src_surf) {
+            DEBUG("setup: given surf_src_fd doesn't match any allocated surface");
+            return -EINVAL;
+        }
+    }
+
+    struct cmd hd_cmd;
+    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags,
+            dst_surf ? dst_surf->width : 0, src_surf ? src_surf->width : 0);
+    for (int i = 0; i < 7; ++i) {
+        hd_cmd.data[i+1] = (fds[i] != -1) ? (page_table_addr_from_fd(fds[i]) >> 8) : 0;
+    }
 
     int err;
     unsigned write_idx;
@@ -508,20 +544,57 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         return err;
     }
 
+    if (dst_surf != NULL) {
+        ctx->dst_surf = dst_surf;
+    }
+
     return 0;
 }
 
 static int doom_open(struct inode* inode, struct file* file) {
-    /* TODO */
-    /* TODO allocate context, get device_data */
+    int number = MINOR(inode->i_rdev);
+    if (number < 0 || number >= DEVICES_LIMIT) {
+        ERROR("doom_open: minor not in range");
+        return -EINVAL;
+    }
+
+    struct device_data* data = &devices[number];
+    struct context* ctx = kmalloc(sizeof(struct context), GFP_KERNEL);
+    if (!ctx) {
+        return -ENOMEM;
+    }
+
+    ctx->devdata = data;
+    ctx->dst_surf = NULL;
+    INIT_LIST_HEAD(&ctx->surf_list);
+
+    file->private_data = ctx;
+
+    return 0;
 }
 
 static int doom_release(struct inode* inode, struct file* file) {
-    /* TODO */
+    /* TODO: wait for cmds using referenced buffers? */
+
+    struct context* ctx = get_ctx(file);
+    if (IS_ERR(ctx)) { ERROR("doom_ioctl"); return PTR_ERR(ctx); }
+
+    struct list_head* pos;
+    struct list_head* q;
+    list_for_each_safe(pos, q, &ctx->surf_list) {
+        struct fd_to_surface* entry = list_entry(pos, struct fd_to_surface, node);
+        list_del(pos);
+        kfree(entry);
+    }
+
+    kfree(ctx);
+    return 0;
 }
 
 static int doom_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
-    /* TODO */
+    struct context* ctx = get_ctx(file);
+    if (IS_ERR(ctx)) { ERROR("doom_ioctl"); return PTR_ERR(ctx); }
+
     switch (cmd) {
     case DOOMDEV2_IOCTL_CREATE_SURFACE:
         return create_surface(ctx, (struct doomdev2_ioctl_create_surface __user*)arg);
@@ -552,21 +625,12 @@ int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
 
 static ssize_t doom_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
     _Static_assert(sizeof(struct doomdev2_cmd) % MAX_KMALLOC == 0, "cmd size mismatch");
-
-    /* TODO */
-    struct doomdev2_cmd* cmds;
-    struct context* ctx;
-    struct hd_buffer* cmd_buf;
-    size_t num_cmds, it;
-    int free_cmds;
-    char* buf;
     int err;
 
     /* TODO switch the set of used buffers (current context) if multiple doom instances are running */
 
-    ctx = get_context(file);
+    struct context* ctx = get_context(file);
     if (IS_ERR(ctx)) { ERROR("doom_write ctx"); return PTR_ERR(ctx); }
-    cmd_buf = ctx->cmd_buf;
 
     if (count % sizeof(doomdev2_cmd) != 0) {
         DEBUG("doom_write: wrong count %llu", count);
@@ -577,7 +641,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
         count = MAX_KMALLOC;
     }
 
-    buf = kmalloc(count, GFP_KERNEL);
+    void* buf = kmalloc(count, GFP_KERNEL);
     if (!buf) {
         DEBUG("doom_write: kmalloc fail");
         return -ENOMEM;
@@ -589,12 +653,12 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
         goto out_copy;
     }
 
-    num_cmds = count / sizeof(doomdev2_cmd);
-    cmds = (struct doomdev2_cmd*)buf;
+    size_t num_cmds = count / sizeof(doomdev2_cmd);
+    struct doomdev2_cmd* cmds = (struct doomdev2_cmd*)buf;
 
     unsigned write_idx;
     ssize_t free_cmds;
-    if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
+    if ((err = wait_for_cmd_buffer(ctx, &write_idx, &free_cmds))) {
         goto out_copy;
     }
 
@@ -603,13 +667,15 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     }
 
     err = 0;
+    size_t it;
     for (it = 0; it < num_cmds; ++it) {
         switch (cmds[it].type) {
         case DOOMDEV2_CMD_TYPE_FILL_RECT: {
             struct doomdev2_cmd_fill_rect cmd = cmds[it].fill_rect;
             uint32_t pos_x = cmd.pos_x;
             uint32_t pos_y = cmd.pos_y;
-            if (pos_x + cmd.width >= ctx->dst_surface.width || pos_y + cmd.height >= ctx->dst_surface.height) {
+            if (!ctx->dst_surf || pos_x + cmd.width >= ctx->dst_surf->width || pos_y + cmd.height >= ctx->dst_surf->height) {
+                DEBUG("fill_rect: wrong arguments or no surf");
                 err = -EINVAL;
                 break;
             }
@@ -625,13 +691,14 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
                     0
                 }
             };
-            if ((err = write_cmd(ctx, &hd_cmd, write_idx))) return err;
+            err = write_cmd(ctx, &hdcmd, write_idx);
             break;
         }
         case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
             struct doomdev2_cmd_draw_line cmd = cmds[it].draw_line;
-            if (cmd.pos_a_x >= ctx->dst_surface.width || cmd.pos_a_y >= ctx->dst_surface.height
-                    || cmd.pos_b_x >= ctx->dst_surface.width || cmd.pos_b_y >= ctx->dst_surface.height) {
+            if (!ctx->dst_surf || cmd.pos_a_x >= ctx->dst_surf->width || cmd.pos_a_y >= ctx->dst_surf->height
+                    || cmd.pos_b_x >= ctx->dst_surf->width || cmd.pos_b_y >= ctx->dst_surf->height) {
+                DEBUG("draw_line: wrong arguments or no surf");
                 err = -EINVAL;
                 break;
             }
@@ -647,7 +714,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
                     0
                 }
             };
-            if ((err = write_cmd(ctx, &hd_cmd, write_idx))) return err;
+            err = write_cmd(ctx, &hdcmd, write_idx);
             break;
         }
         default:
@@ -660,7 +727,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     }
 
     if (it == 0) {
-        /* TODO something failed */
+        /* The first command was invalid, return error */
         goto out_copy;
     }
 
@@ -816,7 +883,15 @@ static void pci_remove(struct pci_dev* dev) {
         ERROR("pci_remove: no pcidata!");
     } else {
         free_irq(dev->irq, data);
-        device_destroy(&doom_class, doom_major + data->number);
+        if (data->number >= 0 && data->number < DEVICES_LIMIT) {
+            device_destroy(&doom_class, doom_major + data->number);
+        } else {
+            ERROR("pci_remove: OOPS");
+            if (&devices[data->number] != data) {
+                ERROR("pci_remove: double OOPS");
+            }
+        }
+        data->number = -1;
         cdev_del(&data->cdev);
         bar = data->bar;
         /* TODO: free dev number */
