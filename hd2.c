@@ -110,6 +110,38 @@ int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
     return 0;
 }
 
+int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, size_t size, size_t* bytes_transferred) {
+    if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
+
+    size_t page = src_pos / PAGE_SIZE;
+    size_t page_off = src_pos % PAGE_SIZE;
+    size_t space_in_page = PAGE_SIZE - page_off;
+    void* src = pages_kern[page] + page_off;
+    *bytes_transferred = 0;
+
+    while (size) {
+        if (space_in_page > size) {
+            space_in_page = size;
+        }
+
+        unsigned long left = copy_from_user(dst, src, space_in_page);
+        *bytes_transferred += (space_in_page - left);
+        if (left) {
+            DEBUG("write_buffer_user: copy_from_user fail");
+            return -EFAULT;
+        }
+
+        src += space_in_page;
+        size -= space_in_page;
+
+        dst = pages_kern[++page];
+        space_in_page = PAGE_SIZE;
+    }
+
+    return 0;
+}
+
+
 int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size_t size, size_t* bytes_transferred) {
     if (src_pos >= buff->size || size > buff->size || src_pos + size > buff->size) { ERROR("bad read_buffer!"); return -EINVAL; }
 
@@ -173,20 +205,54 @@ struct context* get_ctx(struct file* file) {
 
 static int buffer_open(struct inode* inode, struct file* file) {
     /* TODO: is this necessary? */
+    return 0;
 }
 
 static int buffer_release(struct inode* inode, struct file* file) {
-    /* TODO: is this necessary? (release by doom chrdev instead) */
+    /* TODO: is this necessary? */
+    return 0;
 }
 
 static ssize_t buffer_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
-    /* TODO */
+    struct buffer* buff = file->private_data;
+    if (!buff) { ERROR("buffer write: no buff!"); return -EINVAL; }
+    if (file->f_op != buffer_ops) { ERROR("buffer write: wrong fops"); return -EINVAL; }
+
+    if (*off < 0) {
+        return -EINVAL;
+    }
+
+    if (*off >= buff->size) {
+        return -ENOSPC;
+    }
+
+    if (count > buff->size - *off) {
+        count = buff_size - *off;
+    }
+
+    /* TODO: wait for ops */
+
+    if (!count) {
+        return -EINVAL;
+    }
+
+    size_t ret = 0;
+    int err = write_buffer_user(buff, _buff, *off, count, &ret);
+    *off ++ ret;
+
+    if (err && !ret) {
+        return err;
+    }
+
+    if (!ret) { ERROR("buffer_write: OOPS, !ret"); return -EINVAL; }
+
+    return ret;
 }
 
 static ssize_t buffer_read(struct file* file, char __user *_buff, size_t count, loff_t* off) {
     struct buffer* buff = file->private_data;
-    if (!buff) { ERROR("llseek: no buff!"); return -EINVAL; }
-    if (file->f_op != buffer_ops) { ERROR("llseek: wrong fops"); return -EINVAL; }
+    if (!buff) { ERROR("buffer read: no buff!"); return -EINVAL; }
+    if (file->f_op != buffer_ops) { ERROR("buffer read: wrong fops"); return -EINVAL; }
 
     if (*off < 0) {
         return -EINVAL;
@@ -252,6 +318,25 @@ static struct file_operations buffer_ops = {
     .llseek = buffer_llseek
 };
 
+int make_buffer_file(struct buffer* buff, const char* class) { /* TODO: is this class needed? */
+    int _fd = anon_inode_getfd(class, buffer_ops, buff, O_RDWR | O_CREAT);
+    if (_fd < 0) {
+        return _fd;
+    }
+
+    struct fd fd = fdget(_fd);
+    /* TODO: need to do anything else? fdput? */
+    /* TODO: better use anon_inode_getfile, set f_mode, then install fd... */
+    fd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+    fd.file->private_data = buff;
+
+    return _fd;
+}
+
+struct pci_dev* get_pci_dev(struct context* ctx) {
+    /* TODO */
+}
+
 static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
     int err;
 
@@ -272,25 +357,20 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         return -ENOMEM;
     }
 
-    struct pci_dev* pdev; /*TODO: how to get pci_dev from ctx? */
+    struct pci_dev* pdev = get_pci_dev(ctx);
     if ((err = init_buffer(buff, &pdev->dev, params.width * params.height))) {
         DEBUG("create_surface: init_buffer");
         goto out_buff;
     }
 
-    int _fd = anon_inode_getfd("SURFACE", buffer_ops, buff, O_RDWR | O_CREAT);
-    if (_fd < 0) {
-        DEBUG("create surface: failed to get fd, %d" _fd);
-        err = _fd;
+    int fd;
+    if ((fd = mk_buffer_file(buff, "SURFACE")) < 0) {
+        DEBUG("create surface: failed to get fd, %d", fd);
+        err = fd;
         goto out_getfd;
     }
 
-    struct fd fd = fdget(_fd);
-    /* TODO: need to do anything else? fdput? */
-    fd.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
-    fd.file->private_data = buff;
-
-    return _fd;
+    return fd;
 
 out_getfd:
     free_buff(buff, &pdev->dev);
@@ -301,6 +381,45 @@ out_buff:
 }
 
 static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
+    int err;
+
+    struct doomdev2_ioctl_create_buffer params;
+    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_buffer))) {
+        DEBUG("create_buffer copy_from_user fail");
+        return -EFAULT;
+    }
+
+    DEBUG("create_buffer: %u", params.size);
+    if (params.size > MAX_BUFFER_SIZE) {
+        return -EINVAL;
+    }
+
+    struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
+    if (!buff) {
+        return -ENOMEM;
+    }
+
+    struct pci_dev* pdev = get_pci_dev(ctx);
+    if ((err = init_buffer(buff, &pdev->dev, params.size))) {
+        DEBUG("create_buffer: init_buffer");
+        goto out_buff;
+    }
+
+    int fd;
+    if ((fd = mk_buffer_file(buff, "BUFFER")) < 0) {
+        DEBUG("create_buffer: failed to get fd, %d", fd);
+        err = fd;
+        goto out_getfd;
+    }
+
+    return fd;
+
+out_getfd:
+    free_buff(buff, &pdev->dev);
+
+out_buff:
+    kfree(buff);
+    return err;
 }
 
 int verify_buff_fd(int32_t fd) {
@@ -443,6 +562,8 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     char* buf;
     int err;
 
+    /* TODO switch the set of used buffers (current context) if multiple doom instances are running */
+
     ctx = get_context(file);
     if (IS_ERR(ctx)) { ERROR("doom_write ctx"); return PTR_ERR(ctx); }
     cmd_buf = ctx->cmd_buf;
@@ -530,7 +651,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
             break;
         }
         default:
-            /* TODO */
+            /* TODO other cmds */
             break;
         }
 
