@@ -27,13 +27,30 @@ static struct class doom_class = {
     .owner = THIS_MODULE,
 };
 
-
 struct device_data {
     int number;
     void __iomem* bar;
     struct cdev cdev;
     struct buffer cmd_buff;
+
+    /* Manages the lifetime of buffers used by the device.
+       When a SETUP command is sent to the command queue, we remember the set of changed buffers
+       in the queue, increasing their reference counts. We periodically clear the queue,
+       removing buffers which have been replaced and decreasing their reference counts. */
+    struct list_head changes_queue;
+
+    /* Buffers used in the last SETUP command sent to the command buffer. */
+    struct file* last_bufs[NUM_USER_BUFS];
 };
+
+struct buffer_change {
+    /* NULL pointer represents no change. */
+    /* Non-NULL pointer indicates what buffer was used BEFORE the change. */
+    struct file* bufs[NUM_USER_BUFS];
+    uint32_t cmd_number;
+
+    struct list_head list;
+}
 
 static struct device_data devices[DEVICES_LIMIT];
 
@@ -41,7 +58,7 @@ struct context {
     /* TODO */
     struct device_data* devdata;
 
-    struct file* used_buffers[NUM_USER_BUFS];
+    struct fd curr_bufs[NUM_USER_BUFS];
 };
 
 struct context* get_ctx(struct file* file) {
@@ -285,14 +302,7 @@ out_buff:
     return err;
 }
 
-dma_addr_t page_table_addr_from_fd(struct context* ctx, int32_t fd) {
-    struct fd f = fdget(fd);
-    struct buffer* buff = f.file->private_data;
-    fdput(f);
-    return buff->page_table_dev;
-}
-
-int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_cmds) {
+static int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_cmds) {
     /* TODO synchronization */
     *write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
     ssize_t read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
@@ -312,12 +322,45 @@ int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_
     return 0;
 }
 
-static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
-    static const uint32_t flags[7] = { HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
+static struct cmd make_setup(struct context* ctx) {
+    static const uint32_t flags[NUM_USER_BUFS] = {
+        HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
         HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
         HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
 
-    /* TODO optimize: don't send setup if it wouldn't do anything */
+    uint32_t bufs_mask = 0;
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (ctx->curr_bufs[i].file) {
+            bufs_mask |= flags[i];
+        }
+    }
+
+    uint16_t dst_width = 0;
+    uint16_t src_width = 0;
+    {
+        struct file* f;
+        if ((f = ctx->curr_bufs[0].file)) {
+            struct buffer* buff = (struct buffer*)f->private_data;
+            dst_width = buff->width;
+        }
+        if ((f = ctx->curr_bufs[1].file)) {
+            struct buffer* buff = (struct buffer*)f->private_data;
+            src_width = buff->width;
+        }
+    }
+
+    struct cmd hd_cmd;
+    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_width, src_width);
+    for (int i = 0; i < NUM_USER_BUFFS; ++i) {
+        struct file* f = ctx->curr_bufs[i];
+        hd_cmd.data[i+1] = f ? (((struct buffer*)f->private_data)->page_table_dev >> 8) : 0;
+    }
+
+    return hd_cmd;
+}
+
+static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
     struct doomdev_2_ioctl_setup params;
 
     DEBUG("setup");
@@ -327,71 +370,68 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         return -EFAULT;
     }
 
-    int32_t fds[7] = { params.surf_dst_fd, params.surf_src_fd, params.texture_fd,
+    int32_t fds[NUM_USER_BUFS] = { params.surf_dst_fd, params.surf_src_fd, params.texture_fd,
         params.flat_fd, params.colormap_fd, params.translation_fd, params.tranmap_fd };
-
-    uint32_t bufs_mask = 0;
-
-    for (int i = 0; i < 7; ++i) {
-        if (fds[i] == -1) continue;
-
-        struct fd f = fdget(fds[i]);
-        if (!f.file) {
-            DEBUG("setup: fd no file");
-            fdput(f);
-            return -EINVAL;
-        }
-        if (f.file->f_op != buffer_ops) {
-            DEBUG("setup: fd wrong file");
-            fdput(f);
-            return -EINVAL;
-        }
-        fdput(f);
-
-        bufs_mask |= flags[i];
-    }
-
-    struct surface* dst_surf = NULL, src_surf = NULL;
-    if (params.surf_dst_fd != -1) {
-        struct surface* dst_surf = fd_to_surface(ctx, params.surf_dst_fd);
-        if (!dst_surf) {
-            DEBUG("setup: given surf_dst_fd doesn't match any allocated surface");
-            return -EINVAL;
-        }
-    }
-    if (params.surc_src_fd != -1) {
-        struct surface* src_surf = fd_to_surface(ctx, params.surf_src_fd);
-        if (!src_surf) {
-            DEBUG("setup: given surf_src_fd doesn't match any allocated surface");
-            return -EINVAL;
-        }
-    }
-
-    struct cmd hd_cmd;
-    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags,
-            dst_surf ? dst_surf->width : 0, src_surf ? src_surf->width : 0);
-    for (int i = 0; i < 7; ++i) {
-        hd_cmd.data[i+1] = (fds[i] != -1) ? (page_table_addr_from_fd(fds[i]) >> 8) : 0;
-    }
+    struct fd fs[NUM_USER_BUFS];
 
     int err;
-    unsigned write_idx;
-    {
-        ssize_t free_cmds;
-        if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
-            return err;
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (fds[i] == -1) {
+            fs[i] = (struct fd){NULL, 0};
+            continue;
+        }
+
+        fs[i] = fdget(fds[i]);
+        if (!fs[i].file) {
+            DEBUG("setup: fd no file");
+            err = -EINVAL;
+            goto out_files;
+        }
+        if (fs[i].file->f_op != buffer_ops) {
+            DEBUG("setup: fd wrong file");
+            err = -EINVAL;
+            goto out_f_op;
         }
     }
 
-    if ((err = write_cmd(ctx, &hd_cmd, write_idx))) {
-        return err;
+    int j;
+    for (j = 0; j < 2; ++j) {
+        if (fds[j] == -1) continue;
+
+        struct buffer* buff = fs[j].file->private_data;
+        if (!buff->width) {
+            DEBUG("setup: non-surface given as surface");
+            err = -EINVAL;
+            goto out_f_op;
+        }
+    }
+    for (; j < NUM_USER_BUFS; ++j) {
+        if (fds[j] == -1) continue;
+
+        struct buffer* buff = fs[j].file->private_data;
+        if (buff->width) {
+            DEBUG("setup: surface given as non-surface");
+            err = -EINVAL;
+            goto out_f_op;
+        }
     }
 
-    if (dst_surf != NULL) {
-        ctx->dst_surf = dst_surf;
+    for (j = 0; j < NUM_USER_BUFS; ++j) {
+        fdput(ctx->curr_bufs[j]);
+        ctx->curr_bufs[j] = fs[j];
     }
 
     return 0;
+
+out_f_op:
+    fdput(fs[i]);
+out_files:
+    for (--i; i >= 0; --i) {
+        fdput(fs[i]);
+    }
+
+    return err;
 }
 
 static int doom_open(struct inode* inode, struct file* file) {
@@ -454,7 +494,7 @@ struct cmd {
     uint32_t data[8];
 };
 
-int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
+static int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
     if (write_idx >= CMD_BUF_SIZE) { ERROR("write_cmd wrong write_idx! %llu", write_idx); return -EINVAL; }
     if (!ctx->devdata) { ERROR("write_cmd no device!"); return -EINVAL; }
     if (!ctx->devdata->cmd_buff) { ERROR("write_cmd no cmd_buff!"); return -EINVAL; }
@@ -466,11 +506,47 @@ int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
     return write_buffer(buff, cmd->data, dst_pos, 8*4);
 }
 
+/* Checks whether 'x' is in the range ['start', ..., 'end'] (mod 2^32). */
+static bool in_range(uint32_t x, uint32_t start, uint32_t end) {
+    if (start <= end) {
+        return start <= x && x <= end;
+    }
+
+    return start <= x || x <= end;
+}
+
+static void collect_buffers(struct device_data* dev) {
+    uint32_t counter = ioread32(dev->bar + HARDDOOM2_FENCE_COUNTER);
+    while (!list_empty(dev->changes_queue)) {
+        struct buffer_change* change = list_first_entry(&dev->changes_queue, struct buffer_change, list);
+
+        /* If counter is in the range [cmd_number, ..., cmd_number + 3 * CMD_BUF_SIZE] (mod 2^32),
+           then cmd_number is not in the range [counter + 1, ..., counter + CMD_BUF_SIZE + 2048 (mod 2^32)],
+           so this SETUP was already processed by the device and we can collect previous buffers.
+
+           If counter is not in the range [cmd_number, ..., cmd_number + 3 * CMD_BUF_SIZE],
+           this SETUP couldn't have been processed yet: if it had, at least one
+           collect_buffers would have been called while counter was still in this range,
+           so the command would not be in the queue. */
+        if (!in_range(counter, change->cmd_number, change->cmd_number + 3 * CMD_BUF_SIZE)) {
+            return;
+        }
+
+        int i;
+        for (i = 0; i < NUM_USER_BUFS; ++i) {
+            if (change->bufs[i]) {
+                fput(change->bufs[i]);
+            }
+        }
+
+        list_del(&change->list);
+        kfree(change);
+    }
+}
+
 static ssize_t doom_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
     _Static_assert(sizeof(struct doomdev2_cmd) % MAX_KMALLOC == 0, "cmd size mismatch");
     int err;
-
-    /* TODO switch the set of used buffers (current context) if multiple doom instances are running */
 
     struct context* ctx = get_context(file);
     if (IS_ERR(ctx)) { ERROR("doom_write ctx"); return PTR_ERR(ctx); }
@@ -478,6 +554,19 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     if (count % sizeof(doomdev2_cmd) != 0) {
         DEBUG("doom_write: wrong count %llu", count);
         return -EINVAL;
+    }
+
+    int err;
+    unsigned write_idx;
+    {
+        ssize_t free_cmds;
+        if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
+            return err;
+        }
+    }
+
+    if ((err = write_cmd(ctx, &hd_cmd, write_idx))) {
+        return err;
     }
 
     if (count > MAX_KMALLOC) {
