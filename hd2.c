@@ -75,7 +75,7 @@ static int buffer_open(struct inode* inode, struct file* file) {
 }
 
 static int buffer_release(struct inode* inode, struct file* file) {
-    /* TODO: is this necessary? */
+    /* TODO */
     return 0;
 }
 
@@ -353,7 +353,7 @@ static struct cmd make_setup(struct context* ctx) {
     struct cmd hd_cmd;
     hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_width, src_width);
     for (int i = 0; i < NUM_USER_BUFFS; ++i) {
-        struct file* f = ctx->curr_bufs[i];
+        struct file* f = ctx->curr_bufs[i].file;
         hd_cmd.data[i+1] = f ? (((struct buffer*)f->private_data)->page_table_dev >> 8) : 0;
     }
 
@@ -448,8 +448,7 @@ static int doom_open(struct inode* inode, struct file* file) {
     }
 
     ctx->devdata = data;
-    ctx->dst_surf = NULL;
-    INIT_LIST_HEAD(&ctx->surf_list);
+    /* TODO curr buffs */
 
     file->private_data = ctx;
 
@@ -457,18 +456,10 @@ static int doom_open(struct inode* inode, struct file* file) {
 }
 
 static int doom_release(struct inode* inode, struct file* file) {
-    /* TODO: wait for cmds using referenced buffers? */
-
     struct context* ctx = get_ctx(file);
     if (IS_ERR(ctx)) { ERROR("doom_ioctl"); return PTR_ERR(ctx); }
 
-    struct list_head* pos;
-    struct list_head* q;
-    list_for_each_safe(pos, q, &ctx->surf_list) {
-        struct fd_to_surface* entry = list_entry(pos, struct fd_to_surface, node);
-        list_del(pos);
-        kfree(entry);
-    }
+    /* TODO curr buffs */
 
     kfree(ctx);
     return 0;
@@ -493,6 +484,65 @@ static int doom_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
 struct cmd {
     uint32_t data[8];
 };
+
+static int make_cmd(struct context* ctx, struct doomdev2_cmd* user_cmd, struct cmd* dev_cmd) {
+    if (!ctx->curr_bufs[0].file) {
+        DEBUG("write: no dst surface set");
+        return -EINVAL;
+    }
+
+    struct buffer* buff = (struct buffer*)ctx->curr_bufs[0].file->private_data;
+    uint16_t dst_width = buff->width, dst_height = buff->height;
+
+    switch (user_cmd->type) {
+    case DOOMDEV2_CMD_TYPE_FILL_RECT: {
+        struct doomdev2_cmd_fill_rect cmd = user_cmd->fill_rect;
+        uint32_t pos_x = cmd.pos_x, pos_y = cmd.pos_y;
+
+        if (pos_x + cmd.width > dst_width || pos_y + cmd.height > dst_height) {
+            DEBUG("fill_rect: out of bounds");
+            return -EINVAL;
+        }
+
+        dev_cmd->data = {
+            HARDDOOM2_CMD_TYPE_FILL_RECT,
+            0,
+            HARDDOOM2_CMD_W3(cmd.pos_x, cmd.pos_y),
+            0,
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(cmd.width, cmd.height, cmd.fill_color),
+            0
+        };
+
+        return 0;
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
+        struct doomdev2_cmd_draw_line cmd = user_cmd->draw_line;
+        if (cmd.pos_a_x >= dst_width || cmd.pos_a_y >= dst_height
+                || cmd.pos_b_x >= dst_width || cmd.pos_b_y >= dst_height) {
+            DEBUG("draw_line: out of bounds");
+            return -EINVAL;
+        }
+
+        dev_cmd->data = {
+            HARDDOOM2_CMD_TYPE_DRAW_LINE,
+            0,
+            HARDDOOM2_CMD_W3(cmd.pos_a_x, cmd.pos_a_y),
+            HARDDOOM2_CMD_W3(cmd.pos_b_x, cmd.pos_b_y),
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(0, 0, cmd.fill_color),
+            0
+        };
+
+        return 0;
+    }
+    default:
+        /* TODO other cmds */
+        return 1;
+    }
+}
 
 static int write_cmd(struct context* ctx, struct cmd* cmd, size_t write_idx) {
     if (write_idx >= CMD_BUF_SIZE) { ERROR("write_cmd wrong write_idx! %llu", write_idx); return -EINVAL; }
@@ -544,29 +594,71 @@ static void collect_buffers(struct device_data* dev) {
     }
 }
 
+static int ensure_setup(struct context* ctx, size_t write_idx) {
+    struct file** last_bufs = ctx->devdata->last_bufs;
+    struct fd* curr_bufs = ctx->curr_bufs;
+
+    int has_change = 0;
+    int is_diff = 0;
+
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (curr_bufs[i].file != last_bufs[i]) {
+            is_diff = 1;
+            if (last_bufs[i]) {
+                has_change = 1;
+                break;
+            }
+        }
+    }
+
+    if (!is_diff) {
+        return 0;
+    }
+
+    struct buffer_change* change = NULL;
+    if (has_change) {
+        change = kzalloc(sizeof(struct buffer_change), GFP_KERNEL);
+        if (!change) {
+            return -ENOMEM;
+        }
+        INIT_LIST_HEAD(&change->list);
+    }
+
+    struct cmd cmd = make_setup(ctx);
+    int err;
+    if ((err = write_cmd(ctx, &cmd, write_idx))) /* TODO: this should not fail */ {
+        if (change) {
+            kfree(change);
+            return err;
+        }
+    }
+
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (curr_bufs[i].file == last_bufs[i]) continue;
+
+        if (curr_bufs[i].file) {
+            fget(curr_bufs[i].file);
+        }
+        if (last_bufs[i]) {
+            change->bufs[i] = last_bufs[i];
+        }
+        last_bufs[i] = curr_bufs[i].file;
+    }
+
+    return 0;
+}
+
 static ssize_t doom_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
-    _Static_assert(sizeof(struct doomdev2_cmd) % MAX_KMALLOC == 0, "cmd size mismatch");
+    _Static_assert(MAX_KMALLOC % sizeof(struct doomdev2_cmd) == 0, "cmd size mismatch");
     int err;
 
     struct context* ctx = get_context(file);
     if (IS_ERR(ctx)) { ERROR("doom_write ctx"); return PTR_ERR(ctx); }
 
-    if (count % sizeof(doomdev2_cmd) != 0) {
+    if (!count || count % sizeof(doomdev2_cmd) != 0) {
         DEBUG("doom_write: wrong count %llu", count);
         return -EINVAL;
-    }
-
-    int err;
-    unsigned write_idx;
-    {
-        ssize_t free_cmds;
-        if ((err = wait_for_cmd_buffer(&write_idx, &free_cmds))) {
-            return err;
-        }
-    }
-
-    if ((err = write_cmd(ctx, &hd_cmd, write_idx))) {
-        return err;
     }
 
     if (count > MAX_KMALLOC) {
@@ -588,85 +680,65 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     size_t num_cmds = count / sizeof(doomdev2_cmd);
     struct doomdev2_cmd* cmds = (struct doomdev2_cmd*)buf;
 
+    /* TODO: free_cmds > 1 */
+
+    struct cmd dev_cmd;
+    if ((err = make_cmd(ctx, cmds[0], &dev_cmd)) < 0) /* TODO */ {
+        /* The first command was invalid, return error */
+        DEBUG("write: first command invalid");
+        goto out_copy;
+    }
+
     unsigned write_idx;
     ssize_t free_cmds;
+    /* TODO wait_for_cmd_buffer should never fail */
     if ((err = wait_for_cmd_buffer(ctx, &write_idx, &free_cmds))) {
         goto out_copy;
+    }
+
+    int set = ensure_setup(ctx);
+    if (set < 0) {
+        DEBUG("write: could not setup");
+        goto out_user;
+    } else if (set) {
+        --free_cmds;
+        write_idx = (write_idx + 1) % CMD_BUF_SIZE;
     }
 
     if (num_cmds > free_cmds) {
         num_cmds = free_cmds;
     }
 
-    err = 0;
-    size_t it;
-    for (it = 0; it < num_cmds; ++it) {
-        switch (cmds[it].type) {
-        case DOOMDEV2_CMD_TYPE_FILL_RECT: {
-            struct doomdev2_cmd_fill_rect cmd = cmds[it].fill_rect;
-            uint32_t pos_x = cmd.pos_x;
-            uint32_t pos_y = cmd.pos_y;
-            if (!ctx->dst_surf || pos_x + cmd.width >= ctx->dst_surf->width || pos_y + cmd.height >= ctx->dst_surf->height) {
-                DEBUG("fill_rect: wrong arguments or no surf");
-                err = -EINVAL;
-                break;
-            }
-            struct cmd hdcmd = {
-                .data = {
-                    HARDDOOM2_CMD_TYPE_FILL_RECT,
-                    0,
-                    HARDDOOM2_CMD_W3(cmd.pos_x, cmd.pos_y),
-                    0,
-                    0,
-                    0,
-                    HARDDOOM2_CMD_W6_A(cmd.width, cmd.height, cmd.fill_color),
-                    0
-                }
-            };
-            err = write_cmd(ctx, &hdcmd, write_idx);
-            break;
-        }
-        case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
-            struct doomdev2_cmd_draw_line cmd = cmds[it].draw_line;
-            if (!ctx->dst_surf || cmd.pos_a_x >= ctx->dst_surf->width || cmd.pos_a_y >= ctx->dst_surf->height
-                    || cmd.pos_b_x >= ctx->dst_surf->width || cmd.pos_b_y >= ctx->dst_surf->height) {
-                DEBUG("draw_line: wrong arguments or no surf");
-                err = -EINVAL;
-                break;
-            }
-            struct cmd hdcmd {
-                .data = {
-                    HARDDOOM2_CMD_TYPE_DRAW_LINE,
-                    0,
-                    HARDDOOM2_CMD_W3(cmd.pos_a_x, cmd.pos_a_y),
-                    HARDDOOM2_CMD_W3(cmd.pos_b_x, cmd.pos_b_y),
-                    0,
-                    0,
-                    HARDDOOM2_CMD_W6_A(0, 0, cmd.fill_color),
-                    0
-                }
-            };
-            err = write_cmd(ctx, &hdcmd, write_idx);
-            break;
-        }
-        default:
-            /* TODO other cmds */
-            break;
-        }
+    /* TODO: write_cmd should never fail */
 
-        if (err) break;
+    if (!err) /* TODO */ {
+        if ((err = write_cmd(ctx, &dev_cmd, write_idx))) {
+            goto out_copy;
+        }
         write_idx = (write_idx + 1) % CMD_BUF_SIZE;
     }
 
-    if (it == 0) {
-        /* The first command was invalid, return error */
-        goto out_copy;
+    size_t it;
+    for (it = 1; it < num_cmds; ++it) {
+        if ((err = make_cmd(ctx, cmds[it], &dev_cmd)) < 0) /* TODO */ {
+            break;
+        }
+
+        if (!err) /* TODO */ {
+            if ((err = write_cmd(ctx, &dev_cmd, write_idx))) {
+                break;
+            }
+            write_idx = (write_idx + 1) % CMD_BUF_SIZE;
+        }
     }
 
     iowrite32(write_idx, ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
 
+    /* TODO: if fence? */
+    collect_buffers(ctx->devdata);
+
     kfree(buf);
-    return it * sizeof(struct doomdev2_cmd);
+    return it * sizeof(struct doomdev2_cmd); /* TODO: can this overflow? */
 
 out_copy:
     kfree(buf);
@@ -707,6 +779,7 @@ irqreturn_t doom_irq_handler(int irq, void* dev) {
 }
 
 static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
+    /* TODO init changes queue */
     int err = 0;
     void __iomem bar* = NULL;
     struct device* device = NULL;
@@ -808,6 +881,7 @@ out_enable:
 }
 
 static void pci_remove(struct pci_dev* dev) {
+    /* TODO collect changes */
     struct device_data* data = pci_get_drvdata(dev);
     void __iomem* bar = NULL;
 
