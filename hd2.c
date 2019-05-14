@@ -12,6 +12,7 @@ MODULE_LICENSE("GPL");
 #define MAX_KMALLOC (128 * 1024)
 #define PAGE_SIZE (4 * 1024)
 #define MAX_BUFFER_SIZE (4 * 1024 * 1024)
+#define NUM_USER_BUFS 7
 
 /* 128K */
 #define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (8 * 4))
@@ -26,153 +27,6 @@ static struct class doom_class = {
     .owner = THIS_MODULE,
 };
 
-/* TODO: add some refcounter to indicate being used by cmds */
-/* TODO: how to free this safely? */
-struct buffer {
-    void* pages_kern[1024];
-    dma_addr_t pages_dev[1024];
-
-    void* page_table_kern;
-    dma_addr_t page_table_dev;
-
-    size_t size;
-};
-
-int init_buffer(struct buffer* buff, struct device* dev, size_t size) {
-    if (size > MAX_BUFFER_SIZE) { ERROR("bad init_buffer"); return -EINVAL; }
-
-    buff->page_table_kern = dma_alloc_coherent(dev, PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
-    if (!buff->page_table_kern) {
-        DEBUG("init_buffer: page_table_kern");
-        goto out_table;
-    }
-
-    uint32_t* page_table = (uint32_t*)buff->page_table_kern;
-
-    size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    size_t page;
-    for (page = 0; page < num_pages; ++page) {
-        void* buff->pages_kern[page] = dma_alloc_coherent(dev, PAGE_SIZE, &buff->pages_dev[page], GFP_KERNEL);
-        if (!page_kern) {
-            DEBUG("init_buffer: page_kern");
-            goto out_pages;
-        }
-
-        page_table[page] = (uint32_t)(buff->pages_dev[page] >> 4) | 3; /* TODO: think about this */
-    }
-
-    buff->size = size;
-
-    return 0;
-
-out_pages:
-    num_pages = page;
-    for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
-    }
-
-out_table:
-    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
-
-    return -ENOMEM;
-}
-
-void free_buffer(struct buffer* buff, struct device* dev) {
-    size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
-    size_t page;
-    for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
-    }
-
-    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
-}
-
-int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
-    if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
-
-    size_t page = dst_pos / PAGE_SIZE;
-    size_t page_off = dst_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
-    void* dst = pages_kern[page] + page_off;
-
-    while (size) {
-        if (space_in_page > size) {
-            space_in_page = size;
-        }
-
-        memcpy(dst, src, space_in_page);
-        src += space_in_page;
-        size -= space_in_page;
-
-        dst = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
-    }
-
-    return 0;
-}
-
-int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, size_t size, size_t* bytes_transferred) {
-    if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
-
-    size_t page = src_pos / PAGE_SIZE;
-    size_t page_off = src_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
-    void* src = pages_kern[page] + page_off;
-    *bytes_transferred = 0;
-
-    while (size) {
-        if (space_in_page > size) {
-            space_in_page = size;
-        }
-
-        unsigned long left = copy_from_user(dst, src, space_in_page);
-        *bytes_transferred += (space_in_page - left);
-        if (left) {
-            DEBUG("write_buffer_user: copy_from_user fail");
-            return -EFAULT;
-        }
-
-        src += space_in_page;
-        size -= space_in_page;
-
-        dst = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
-    }
-
-    return 0;
-}
-
-
-int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size_t size, size_t* bytes_transferred) {
-    if (src_pos >= buff->size || size > buff->size || src_pos + size > buff->size) { ERROR("bad read_buffer!"); return -EINVAL; }
-
-    size_t page = src_pos / PAGE_SIZE;
-    size_t page_off = src_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
-    void* src = pages_kern[page] + page_off;
-    *bytes_transferred = 0;
-
-    while (size) {
-        if (space_in_page > size) {
-            space_in_page = size;
-        }
-
-        unsigned long left = copy_to_user(dst, src, space_in_page);
-        *bytes_transferred += (space_in_page - left);
-        if (left) {
-            DEBUG("read_buffer_user: copy_to_user fail");
-            return -EFAULT;
-        }
-
-        dst += space_in_page;
-        size -= space_in_page;
-
-        src = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
-    }
-
-    return 0;
-}
 
 struct device_data {
     int number;
@@ -183,38 +37,12 @@ struct device_data {
 
 static struct device_data devices[DEVICES_LIMIT];
 
-struct surface {
-    uint16_t width;
-    uint16_t height;
-};
-
-/* Map FDs representing surface buffers to the surfaces */
-struct fd_to_surface {
-    int fd;
-    struct surface surf;
-
-    struct list_head node;
-}
-
 struct context {
     /* TODO */
     struct device_data* devdata;
-    struct surface* dst_surf;
 
-    struct list_head surf_list;
-    /* TODO: should fd refs be stored so that buffers don't get freed prematurely? */
+    struct file* used_buffers[NUM_USER_BUFS];
 };
-
-struct surface* fd_to_surface(struct context* ctx, int32_t fd) {
-    struct list_head* pos;
-    list_for_each(pos, &ctx->surf_list) {
-        struct fd_to_surface* entry = list_entry(pos, struct fd_to_surface, node);
-        if (entry->fd == fd) {
-            return &entry->surf;
-        }
-    }
-    return NULL;
-}
 
 struct context* get_ctx(struct file* file) {
     if (!file) { ERROR("get_ctx: file NULL"); return ERR_PTR(-EINVAL); }
@@ -225,8 +53,8 @@ struct context* get_ctx(struct file* file) {
 }
 
 static int buffer_open(struct inode* inode, struct file* file) {
-    /* TODO: is this necessary? */
-    return 0;
+    /* We don't allow opening a buffer multiple times by the user. */
+    return -ENODEV;
 }
 
 static int buffer_release(struct inode* inode, struct file* file) {
@@ -380,6 +208,12 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         return -ENOMEM;
     }
 
+    struct fd_to_surface* fd_to_surf = kmalloc(sizeof(struct fd_to_surface), GFP_KERNEL);
+    if (!fd_to_usrf) {
+        err = -ENOMEM;
+        goto out_fd_to_surf;
+    }
+
     struct pci_dev* pdev = get_pci_dev(ctx);
     if ((err = init_buffer(buff, &pdev->dev, params.width * params.height))) {
         DEBUG("create_surface: init_buffer");
@@ -393,12 +227,18 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         goto out_getfd;
     }
 
+    /* TODO: is there a race? (user might mess with fd) */
+    fd_to_surf->fd = fd;
+    fd_to_surf->surf = { .width = params.width, .height = params.height };
+    list_add(&fd_to_surf->node, &ctx->surf_list);
+
     return fd;
 
 out_getfd:
     free_buff(buff, &pdev->dev);
-
 out_buff:
+    kfree(fd_to_surf);
+out_fd_to_surf:
     kfree(buff);
     return err;
 }
@@ -498,12 +338,15 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         struct fd f = fdget(fds[i]);
         if (!f.file) {
             DEBUG("setup: fd no file");
+            fdput(f);
             return -EINVAL;
         }
         if (f.file->f_op != buffer_ops) {
             DEBUG("setup: fd wrong file");
+            fdput(f);
             return -EINVAL;
         }
+        fdput(f);
 
         bufs_mask |= flags[i];
     }
