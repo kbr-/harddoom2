@@ -202,7 +202,7 @@ struct pci_dev* get_pci_dev(struct context* ctx) {
 }
 
 int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t width, uint16_t height) {
-    /* TODO: is this class needed? */
+    /* TODO: is 'class' needed? */
     int err;
 
     struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
@@ -220,22 +220,31 @@ int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t wi
     buff->width = width;
     buff->height = height;
 
-    int fd = anon_inode_getfd(class, buffer_ops, buff, O_RDWR | O_CREAT);
+    int flags = O_RDWR | O_CREAT;
+
+    int fd = get_unused_fd_flags(flags);
     if (fd < 0) {
-        DEBUG("make_buffer: failed to get fd, %d", fd);
+        DEBUG("make_buffer: get unused fd, %d", fd);
         err = fd;
         goto out_getfd;
     }
 
-    struct fd f = fdget(fd);
-    /* TODO: better use anon_inode_getfile, set f_mode, then install fd... ? */
-    f.file->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
-    f.file->private_data = buff;
+    struct file* f = anon_inode_getfile(class, buffer_ops, buff, flags);
+    if (IS_ERR(f)) {
+        DEBUG("make_buffer: getfile");
+        err = PTR_ERR(f);
+        goto out_getfile;
+    }
+
+    f->f_mode = FMODE_LSEEK | FMODE_PREAD | FMORE_PWRITE;
+
+    fd_install(fd, f);
     /* TODO: need to do anything else? */
-    fdput(f);
 
     return fd;
 
+out_getfile:
+    put_unused_fd(fd);
 out_getfd:
     free_buffer(buff);
 out_buff:
@@ -559,7 +568,7 @@ static bool in_range(uint32_t x, uint32_t start, uint32_t end) {
 
 static void collect_buffers(struct device_data* dev) {
     uint32_t counter = ioread32(dev->bar + HARDDOOM2_FENCE_COUNTER);
-    while (!list_empty(dev->changes_queue)) {
+    while (!list_empty(&dev->changes_queue)) {
         struct buffer_change* change = list_first_entry(&dev->changes_queue, struct buffer_change, list);
 
         /* If counter is in the range [cmd_number, ..., cmd_number + 3 * CMD_BUF_SIZE] (mod 2^32),
@@ -688,8 +697,6 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
         goto out_copy;
     }
 
-    /* TODO: free_cmds > 1 */
-
     uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
     int set = ensure_setup(ctx, HARDDOOM2_CMD_FLAG_FENCE | extra_flags);
@@ -727,8 +734,9 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
 
     iowrite32(write_idx, ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
 
-    /* TODO: if fence? */
-    collect_buffers(ctx->devdata);
+    if (set) { /* TODO: other fences */
+        collect_buffers(ctx->devdata);
+    }
 
     kfree(buf);
     return it * sizeof(struct doomdev2_cmd); /* TODO: can this overflow? */
@@ -856,6 +864,24 @@ void device_off(void __iomem* bar) {
     ioread32(bar + HARDDOOM2_ENABLE);
 }
 
+void free_all_buffers(struct device_data* data) {
+    free_buffer(&data->cmd_buff);
+
+    for (int i = 0; i < NUM_USER_BUFS; ++i) {
+        fput(data->last_bufs[i]);
+    }
+
+    while (!list_empty(&data->changes_queue)) {
+        struct buffer_change* change = list_first_entry(&data->changes_queue, struct buffer_change, list);
+        for (int i = 0; i < NUM_USER_BUFS; ++i) {
+            fput(change->bufs[i]);
+        }
+
+        list_del(&change->list);
+        kfree(change);
+    }
+}
+
 static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     int err = 0;
     void __iomem bar* = NULL;
@@ -954,7 +980,7 @@ err_device:
     cdev_del(&data->cdev);
 out_cdev_add:
     device_off(bar);
-    free_buffer(&data->cmd_buff);
+    free_all_buffers(data);
 out_cmd_buff:
     pci_set_drvdata(pdev, NULL);
     /* TODO */
@@ -989,6 +1015,11 @@ static void pci_remove(struct pci_dev* dev) {
         data->number = -1;
         cdev_del(&data->cdev);
         bar = data->bar;
+
+        /* TODO: what if device gone */
+        device_off(bar);
+        free_all_buffers(data);
+
         /* TODO: free dev number */
     }
 
@@ -1006,15 +1037,18 @@ static void pci_remove(struct pci_dev* dev) {
 }
 
 static int pci_suspend(struct pci_dev* dev, pm_message_t state) {
+    DEBUG("suspend");
     /* TODO cleanup */
     return 0;
 }
 
 static int pci_resume(struct pci_dev* dev) {
+    DEBUG("resume");
     /* TODO: resume */
 }
 
 static void pci_shutdown(struct pci_dev* dev) {
+    DEBUG("shutdown");
     /* TODO cleanup */
 }
 
