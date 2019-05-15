@@ -14,6 +14,7 @@ MODULE_LICENSE("GPL");
 #define MAX_BUFFER_SIZE (4 * 1024 * 1024)
 #define NUM_USER_BUFS 7
 #define PING_PERIOD (2048 + 32)
+#define NUM_INTR_BITS 15
 
 /* 128K */
 #define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (8 * 4))
@@ -305,7 +306,7 @@ static int wait_for_cmd_buffer(struct context* ctx, uint32_t write_idx, uint32_t
 
     /* TODO interruptible: check if something broke */
     wait_event(&ctx->cmd_wait_queue,
-        (*free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - *write_idx) >= 2);
+        (*free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - *write_idx - 1) >= 2);
 
     intrs = ioread32(bar + HARDDOOM2_INTR_ENABLE);
     intrs &= ~HARDDOOM2_INTR_PONG_ASYNC;
@@ -761,13 +762,77 @@ int alloc_dev_number() {
     return ret;
 }
 
-irqreturn_t doom_irq_handler(int irq, void* dev) {
+/* A handler returns the associated bit if the interrupt should still be enabled or zero otherwise. */
+typedef uint32_t (*doom_irq_handler_t)(struct device_data*, uint32_t);
+
+uint32_t handle_fence(struct device_data* data, uint32_t bit) {
+    DEBUG("pong_fence");
     /* TODO */
-    struct device_data* data = dev;
+    return 0;
+}
+
+uint32_t handle_pong_sync(struct device_data* data, uint32_t bit) {
+    DEBUG("pong_sync");
+    /* TODO */
+    return 0;
+}
+
+uint32_t handle_pong_async(struct device_data* data, uint32_t bit) {
+    /* TODO synchro */
+    DEBUG("pong_async");
+
+    uint32_t write_idx = ioread32(bar + HARDDOOM2_CMD_WRITE_IDX);
+    uint32_t read_idx = ioread32(bar + HARDDOOM2_CMD_READ_IDX);
+    if (read_idx - write_idx - 1 >= 2) {
+        wake_up(&data->cmd_wait_queue);
+        return 0;
+    }
+
+    return bit;
+}
+
+uint32_t handle_impossible(struct device_data* data, uint32_t bit) {
+    ERROR("Impossible interrupt: %u", bit);
+    return 0;
+}
+
+irqreturn_t doom_irq_handler(int irq, void* devdata) {
+    static const uint32_t intr_bits[NUM_INTR_BITS] = {
+        HARDDOOM2_INTR_FENCE, HARDDOOM2_INTR_PONG_SYNC, HARDDOOM2_INTR_PONG_ASYNC,
+        HARDDOOM2_INTR_FE_ERROR, HARDDOOM2_INTR_CMD_OVERFLOW, HARDDOOM2_INTR_SURF_DST_OVERFLOW,
+        HARDDOOM2_INTR_SURF_SRC_OVERFLOW, HARDDOOM2_INTR_PAGE_FAULT_CMD, HARDDOOM2_INTR_PAGE_FAULT_SURF_DST,
+        HARDDOOM2_PAGE_FAULT_SURF_SRC, HARDDOOM2_PAGE_FAULT_TEXTURE, HARDDOOM2_PAGE_FAULT_FLAT,
+        HARDDOOM2_PAGE_FAULT_TRANSLATION, HARDDOOM2_PAGE_FAULT_COLORMAP, HARDDOOM2_PAGE_FAULT_TRANMAP };
+
+    static const doom_irq_handler_t[NUM_INTR_BITS] = {
+        handle_fence, handle_pong_sync, handle_pong_async,
+        [3 ... (NUM_INTR_BITS - 1)] = handle_impossible };
+
+    /* TODO */
+    struct device_data* data = devdata;
     if (!dev) {
         ERROR("No data in irq_handler!");
         BUG();
     }
+
+    uint32_t active = ioread32(bar + HARDDOOM2_INTR);
+
+    int served = 0;
+    for (int i = 0; i < NUM_INTR_BITS; ++i) {
+        uint32_t bit = intr_bits[i];
+        if (bit & active) {
+            active &= ~intr_handlers[i](data, bit);
+            served = 1;
+        }
+    }
+
+    /* TODO synchro */
+    if (served) {
+        iowrite32(active, bar + HARDDOOM2_INTR);
+        return IRQ_HANDLED;
+    }
+
+    return IRQ_NONE;
 }
 
 static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
