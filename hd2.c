@@ -13,6 +13,7 @@ MODULE_LICENSE("GPL");
 #define PAGE_SIZE (4 * 1024)
 #define MAX_BUFFER_SIZE (4 * 1024 * 1024)
 #define NUM_USER_BUFS 7
+#define PING_PERIOD (2048 + 32)
 
 /* 128K */
 #define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (8 * 4))
@@ -34,6 +35,9 @@ struct device_data {
     struct buffer cmd_buff;
 
     struct pci_dev* pdev;
+
+    /* Used to wait for free space in the command buffer. */
+    wait_queue_head_t cmd_wait_queue;
 
     /* Manages the lifetime of buffers used by the device.
        When a SETUP command is sent to the command queue, we remember the set of changed buffers
@@ -273,37 +277,53 @@ static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffe
     return make_buffer(ctx, "BUFFER", params.size, 0, 0);
 }
 
-static int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_cmds) {
+static int wait_for_cmd_buffer(struct context* ctx, uint32_t write_idx, uint32_t* free_cmds) {
     /* TODO synchronization */
-    *write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
-    ssize_t read_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_READ_IDX);
+    void __iomem* bar = ctx->devdata->bar;
 
-    *free_cmds = read_idx - write_idx - 1; /* TODO is this correct? */
-    if (free_cmds < 0) free_cmds += CMD_BUF_SIZE;
+    *free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - write_idx - 1;
+    if (*free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); return -EINVAL; }
 
-    if (free_cmds < 0 || free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); return -EINVAL; }
-
-    if (free_cmds == 0) {
-        DEBUG("doom_write: no space in queue");
-        /* TODO wait */
+    if (*free_cmds >= 2) {
+        return 0;
     }
 
-    /* TODO set free_cmds after waiting */
+    DEBUG("doom_write: no space in queue");
+
+    iowrite32(HARDDOOM2_INTR_PONG_ASYNC, bar + HARDDOOM2_INTR);
+
+    /* TODO: why? */
+    *free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - write_idx - 1;
+    if (*free_cmds >= CMD_BUF_SIZE) { ERROR("number of free cmds: %d", free_cmds); return -EINVAL; }
+    if (*free_cmds >= 2) {
+        return 0;
+    }
+
+    uint32_t intrs = ioread32(bar + HARDDOOM2_INTR_ENABLE);
+    intrs |= HARDDOOM2_INTR_PONG_ASYNC;
+    iowrite(intrs, bar + HARDDOOM2_INTR_ENABLE);
+
+    /* TODO interruptible: check if something broke */
+    wait_event(&ctx->cmd_wait_queue,
+        (*free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - *write_idx) >= 2);
+
+    intrs = ioread32(bar + HARDDOOM2_INTR_ENABLE);
+    intrs &= ~HARDDOOM2_INTR_PONG_ASYNC;
+    iowrite(intrs, bar + HARDDOOM2_INTR_ENABLE);
 
     return 0;
 }
 
-static struct cmd make_setup(struct context* ctx) {
-    static const uint32_t flags[NUM_USER_BUFS] = {
+static struct cmd make_setup(struct context* ctx, uint32_t extra_flags) {
+    static const uint32_t bufs_flags[NUM_USER_BUFS] = {
         HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
         HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
         HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
 
-    uint32_t bufs_mask = HARDDOOM2_CMD_FLAG_FENCE;
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
         if (ctx->curr_bufs[i].file) {
-            bufs_mask |= flags[i];
+            extra_flags |= bufs_flags[i];
         }
     }
 
@@ -322,7 +342,7 @@ static struct cmd make_setup(struct context* ctx) {
     }
 
     struct cmd hd_cmd;
-    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_mask, dst_width, src_width);
+    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);
     for (int i = 0; i < NUM_USER_BUFFS; ++i) {
         struct file* f = ctx->curr_bufs[i].file;
         hd_cmd.data[i+1] = f ? (((struct buffer*)f->private_data)->page_table_dev >> 8) : 0;
@@ -456,7 +476,7 @@ struct cmd {
     uint32_t data[8];
 };
 
-static int make_cmd(struct context* ctx, struct doomdev2_cmd* user_cmd, struct cmd* dev_cmd) {
+static int make_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd, struct cmd* dev_cmd, uint32_t extra_flags) {
     if (!ctx->curr_bufs[0].file) {
         DEBUG("write: no dst surface set");
         return -EINVAL;
@@ -476,7 +496,7 @@ static int make_cmd(struct context* ctx, struct doomdev2_cmd* user_cmd, struct c
         }
 
         dev_cmd->data = {
-            HARDDOOM2_CMD_TYPE_FILL_RECT,
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
             0,
             HARDDOOM2_CMD_W3(cmd.pos_x, cmd.pos_y),
             0,
@@ -497,7 +517,7 @@ static int make_cmd(struct context* ctx, struct doomdev2_cmd* user_cmd, struct c
         }
 
         dev_cmd->data = {
-            HARDDOOM2_CMD_TYPE_DRAW_LINE,
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_LINE, extra_flags),
             0,
             HARDDOOM2_CMD_W3(cmd.pos_a_x, cmd.pos_a_y),
             HARDDOOM2_CMD_W3(cmd.pos_b_x, cmd.pos_b_y),
@@ -565,7 +585,7 @@ static void collect_buffers(struct device_data* dev) {
     }
 }
 
-static int ensure_setup(struct context* ctx, size_t write_idx) {
+static int ensure_setup(struct context* ctx, size_t write_idx, uint32_t extra_flags) {
     struct file** last_bufs = ctx->devdata->last_bufs;
     struct fd* curr_bufs = ctx->curr_bufs;
 
@@ -596,7 +616,7 @@ static int ensure_setup(struct context* ctx, size_t write_idx) {
         list_add_tail(&change->list, &ctx->devdata->changes_queue);
     }
 
-    struct cmd cmd = make_setup(ctx);
+    struct cmd cmd = make_setup(ctx, extra_flags);
     int err;
     if ((err = write_cmd(ctx, &cmd, write_idx))) /* TODO: this should not fail */ {
         if (change) {
@@ -652,29 +672,33 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
     size_t num_cmds = count / sizeof(doomdev2_cmd);
     struct doomdev2_cmd* cmds = (struct doomdev2_cmd*)buf;
 
-    /* TODO: free_cmds > 1 */
-
     struct cmd dev_cmd;
-    if ((err = make_cmd(ctx, cmds[0], &dev_cmd)) < 0) /* TODO */ {
+    if ((err = make_cmd(ctx, &cmds[0], &dev_cmd, 0)) < 0) /* TODO */ {
         /* The first command was invalid, return error */
         DEBUG("write: first command invalid");
         goto out_copy;
     }
 
-    unsigned write_idx;
-    ssize_t free_cmds;
+    uint32_t write_idx = ioread32(bar + HARDDOOM2_CMD_WRITE_IDX);
+
+    uint32_t free_cmds;
     /* TODO wait_for_cmd_buffer should never fail */
-    if ((err = wait_for_cmd_buffer(ctx, &write_idx, &free_cmds))) {
+    if ((err = wait_for_cmd_buffer(ctx, write_idx, &free_cmds))) {
         goto out_copy;
     }
 
-    int set = ensure_setup(ctx);
+    /* TODO: free_cmds > 1 */
+
+    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
+
+    int set = ensure_setup(ctx, HARDDOOM2_CMD_FLAG_FENCE | extra_flags);
     if (set < 0) {
         DEBUG("write: could not setup");
         goto out_user;
     } else if (set) {
         --free_cmds;
         write_idx = (write_idx + 1) % CMD_BUF_SIZE;
+        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
     }
     /* TODO: <= 1 fence */
 
@@ -684,16 +708,10 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
 
     /* TODO: write_cmd should never fail */
 
-    if (!err) /* TODO */ {
-        if ((err = write_cmd(ctx, &dev_cmd, write_idx))) {
-            goto out_copy;
-        }
-        write_idx = (write_idx + 1) % CMD_BUF_SIZE;
-    }
-
     size_t it;
-    for (it = 1; it < num_cmds; ++it) {
-        if ((err = make_cmd(ctx, cmds[it], &dev_cmd)) < 0) /* TODO */ {
+    for (it = 0; it < num_cmds; ++it) {
+        /* We remake the first cmd to take extra_flags into account */
+        if ((err = make_cmd(ctx, &cmds[it], &dev_cmd, extra_flags)) < 0) /* TODO */ {
             break;
         }
 
@@ -702,6 +720,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
                 break;
             }
             write_idx = (write_idx + 1) % CMD_BUF_SIZE;
+            extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
         }
     }
 
@@ -813,6 +832,8 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     cdev_init(&data->cdev, &doom_ops);
     data->cdev.owner = THIS_MODULE;
     data->pdev = pdev;
+
+    init_waitqueue_head(&data->cmd_wait_queue);
     INIT_LIST_HEAD(&data->changes_queue);
 
     /* TODO: setup device before cdev_add */
