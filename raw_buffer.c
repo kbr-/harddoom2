@@ -1,7 +1,4 @@
 
-
-/* TODO: add some refcounter to indicate being used by cmds */
-/* TODO: how to free this safely? */
 struct buffer {
     void* pages_kern[1024];
     dma_addr_t pages_dev[1024];
@@ -10,6 +7,8 @@ struct buffer {
     dma_addr_t page_table_dev;
 
     size_t size;
+
+    struct device* dev;
 
     /* Non-zero values indicate that this is a surface buffer.
        Zero indicates any other type of buffer (cmd, texture, etc.).
@@ -42,6 +41,7 @@ int init_buffer(struct buffer* buff, struct device* dev, size_t size) {
     }
 
     buff->size = size;
+    buff->dev = dev;
     buff->width = 0;
     buff->height = 0;
 
@@ -59,14 +59,15 @@ out_table:
     return -ENOMEM;
 }
 
-void free_buffer(struct buffer* buff, struct device* dev) {
+void free_buffer(struct buffer* buff) {
     size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t page;
+    /* TODO: dev might be gone */
     for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+        dma_free_coherent(buff->dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
     }
 
-    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
+    dma_free_coherent(buff->dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
 }
 
 int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {

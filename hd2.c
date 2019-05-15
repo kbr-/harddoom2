@@ -33,6 +33,8 @@ struct device_data {
     struct cdev cdev;
     struct buffer cmd_buff;
 
+    struct pci_dev* pdev;
+
     /* Manages the lifetime of buffers used by the device.
        When a SETUP command is sent to the command queue, we remember the set of changed buffers
        in the queue, increasing their reference counts. We periodically clear the queue,
@@ -55,7 +57,7 @@ struct buffer_change {
 static struct device_data devices[DEVICES_LIMIT];
 
 struct context {
-    /* TODO */
+    /* TODO? */
     struct device_data* devdata;
 
     struct fd curr_bufs[NUM_USER_BUFS];
@@ -75,7 +77,12 @@ static int buffer_open(struct inode* inode, struct file* file) {
 }
 
 static int buffer_release(struct inode* inode, struct file* file) {
-    /* TODO */
+    struct buffer* buff = (struct buffer*)file->private_data;
+    if (!buff) { ERROR("buffer_release"); return -EINVAL; }
+    free_buffer(buff);
+    kfree(buff);
+    file->private_data = NULL;
+
     return 0;
 }
 
@@ -184,10 +191,35 @@ static struct file_operations buffer_ops = {
     .llseek = buffer_llseek
 };
 
-int make_buffer_file(struct buffer* buff, const char* class) { /* TODO: is this class needed? */
+struct pci_dev* get_pci_dev(struct context* ctx) {
+    /* TODO might be gone? */
+    return ctx->pdev;
+}
+
+int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t width, uint16_t height) {
+    /* TODO: is this class needed? */
+    int err;
+
+    struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
+    if (!buff) {
+        DEBUG("make_buffer: kmalloc");
+        return -ENOMEM;
+    }
+
+    struct pci_dev* pdev = get_pci_dev(ctx);
+    if ((err = init_buffer(buff, &pdev->dev, size))) {
+        DEBUG("make_buffer: init_buffer");
+        goto out_buff;
+    }
+
+    buff->width = width;
+    buff->height = height;
+
     int fd = anon_inode_getfd(class, buffer_ops, buff, O_RDWR | O_CREAT);
     if (fd < 0) {
-        return fd;
+        DEBUG("make_buffer: failed to get fd, %d", fd);
+        err = fd;
+        goto out_getfd;
     }
 
     struct fd f = fdget(fd);
@@ -198,15 +230,16 @@ int make_buffer_file(struct buffer* buff, const char* class) { /* TODO: is this 
     fdput(f);
 
     return fd;
-}
 
-struct pci_dev* get_pci_dev(struct context* ctx) {
-    /* TODO */
+out_getfd:
+    free_buff(buff);
+out_buff:
+    kfree(buff);
+    return err;
 }
 
 static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surface __user* _params) {
     int err;
-    /* TODO: store in context */
 
     struct doomdev2_ioctl_create_surface params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
@@ -220,44 +253,7 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         return -EINVAL;
     }
 
-    struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
-    if (!buff) {
-        return -ENOMEM;
-    }
-
-    struct fd_to_surface* fd_to_surf = kmalloc(sizeof(struct fd_to_surface), GFP_KERNEL);
-    if (!fd_to_usrf) {
-        err = -ENOMEM;
-        goto out_fd_to_surf;
-    }
-
-    struct pci_dev* pdev = get_pci_dev(ctx);
-    if ((err = init_buffer(buff, &pdev->dev, params.width * params.height))) {
-        DEBUG("create_surface: init_buffer");
-        goto out_buff;
-    }
-
-    int fd;
-    if ((fd = mk_buffer_file(buff, "SURFACE")) < 0) {
-        DEBUG("create surface: failed to get fd, %d", fd);
-        err = fd;
-        goto out_getfd;
-    }
-
-    /* TODO: is there a race? (user might mess with fd) */
-    fd_to_surf->fd = fd;
-    fd_to_surf->surf = { .width = params.width, .height = params.height };
-    list_add(&fd_to_surf->node, &ctx->surf_list);
-
-    return fd;
-
-out_getfd:
-    free_buff(buff, &pdev->dev);
-out_buff:
-    kfree(fd_to_surf);
-out_fd_to_surf:
-    kfree(buff);
-    return err;
+    return make_buffer(ctx, "SURFACE", params,width * params.height, params.width, params.height);
 }
 
 static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
@@ -274,32 +270,7 @@ static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffe
         return -EINVAL;
     }
 
-    struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
-    if (!buff) {
-        return -ENOMEM;
-    }
-
-    struct pci_dev* pdev = get_pci_dev(ctx);
-    if ((err = init_buffer(buff, &pdev->dev, params.size))) {
-        DEBUG("create_buffer: init_buffer");
-        goto out_buff;
-    }
-
-    int fd;
-    if ((fd = mk_buffer_file(buff, "BUFFER")) < 0) {
-        DEBUG("create_buffer: failed to get fd, %d", fd);
-        err = fd;
-        goto out_getfd;
-    }
-
-    return fd;
-
-out_getfd:
-    free_buff(buff, &pdev->dev);
-
-out_buff:
-    kfree(buff);
-    return err;
+    return make_buffer(ctx, "BUFFER", params.size, 0, 0);
 }
 
 static int wait_for_cmd_buffer(struct context* ctx, unsigned* write_idx, ssize_t* free_cmds) {
@@ -328,7 +299,7 @@ static struct cmd make_setup(struct context* ctx) {
         HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
         HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
 
-    uint32_t bufs_mask = 0;
+    uint32_t bufs_mask = HARDDOOM2_CMD_FLAG_FENCE;
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
         if (ctx->curr_bufs[i].file) {
@@ -351,7 +322,7 @@ static struct cmd make_setup(struct context* ctx) {
     }
 
     struct cmd hd_cmd;
-    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_flags, dst_width, src_width);
+    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, bufs_mask, dst_width, src_width);
     for (int i = 0; i < NUM_USER_BUFFS; ++i) {
         struct file* f = ctx->curr_bufs[i].file;
         hd_cmd.data[i+1] = f ? (((struct buffer*)f->private_data)->page_table_dev >> 8) : 0;
@@ -399,7 +370,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     for (j = 0; j < 2; ++j) {
         if (fds[j] == -1) continue;
 
-        struct buffer* buff = fs[j].file->private_data;
+        struct buffer* buff = (struct buffer*)fs[j].file->private_data;
         if (!buff->width) {
             DEBUG("setup: non-surface given as surface");
             err = -EINVAL;
@@ -409,7 +380,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     for (; j < NUM_USER_BUFS; ++j) {
         if (fds[j] == -1) continue;
 
-        struct buffer* buff = fs[j].file->private_data;
+        struct buffer* buff = (struct buffer*)fs[j].file->private_data;
         if (buff->width) {
             DEBUG("setup: surface given as non-surface");
             err = -EINVAL;
@@ -441,15 +412,12 @@ static int doom_open(struct inode* inode, struct file* file) {
         return -EINVAL;
     }
 
-    struct device_data* data = &devices[number];
-    struct context* ctx = kmalloc(sizeof(struct context), GFP_KERNEL);
+    struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {
         return -ENOMEM;
     }
 
-    ctx->devdata = data;
-    /* TODO curr buffs */
-
+    ctx->devdata = &devices[number];
     file->private_data = ctx;
 
     return 0;
@@ -459,7 +427,10 @@ static int doom_release(struct inode* inode, struct file* file) {
     struct context* ctx = get_ctx(file);
     if (IS_ERR(ctx)) { ERROR("doom_ioctl"); return PTR_ERR(ctx); }
 
-    /* TODO curr buffs */
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        fdput(ctx->curr_bufs[i]);
+    }
 
     kfree(ctx);
     return 0;
@@ -622,13 +593,14 @@ static int ensure_setup(struct context* ctx, size_t write_idx) {
         if (!change) {
             return -ENOMEM;
         }
-        INIT_LIST_HEAD(&change->list);
+        list_add_tail(&change->list, &ctx->devdata->changes_queue);
     }
 
     struct cmd cmd = make_setup(ctx);
     int err;
     if ((err = write_cmd(ctx, &cmd, write_idx))) /* TODO: this should not fail */ {
         if (change) {
+            list_del(&change_list);
             kfree(change);
             return err;
         }
@@ -704,6 +676,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
         --free_cmds;
         write_idx = (write_idx + 1) % CMD_BUF_SIZE;
     }
+    /* TODO: <= 1 fence */
 
     if (num_cmds > free_cmds) {
         num_cmds = free_cmds;
@@ -778,8 +751,7 @@ irqreturn_t doom_irq_handler(int irq, void* dev) {
     }
 }
 
-static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
-    /* TODO init changes queue */
+static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     int err = 0;
     void __iomem bar* = NULL;
     struct device* device = NULL;
@@ -793,17 +765,17 @@ static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
         return -EINVAL;
     }
 
-    if ((err = pci_enable_device(dev))) {
+    if ((err = pci_enable_device(pdev))) {
         DEBUG("failed to enable device");
         goto out_enable;
     }
 
-    if ((err = pci_request_regions(dev, DRV_NAME))) {
+    if ((err = pci_request_regions(pdev, DRV_NAME))) {
         DEBUG("failed to request regions");
         goto out_regions;
     }
 
-    bar = iomap(dev, 0, 0);
+    bar = iomap(pdev, 0, 0);
     if (!bar) {
         DEBUG("can't map register space");
         err = -ENOMEM;
@@ -811,13 +783,13 @@ static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
     }
 
     /* DMA support */
-    pci_set_master(dev);
-    if ((err = pci_set_dma_mask(dev, DMA_BIT_MASK(40)))) {
+    pci_set_master(pdev);
+    if ((err = pci_set_dma_mask(pdev, DMA_BIT_MASK(40)))) {
         DEBUG("WAT: no 40bit DMA, err: %d", err);
         err = -EIO;
         goto out_dma;
     }
-    if ((err = pci_set_consistent_dma_mask(dev, DMA_BIT_MASK(40)))) {
+    if ((err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(40)))) {
         DEBUG("WAT: no 40bit DMA, err: %d (set_consistent_dma_mask)", err);
         err = -EIO;
         goto out_dma;
@@ -833,12 +805,15 @@ static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
     if (dev_number >= DEVICE_LIMIT) { ERROR("OOPS"); err = -ENOSPC; goto out_dma; }
 
     data = &devices[dev_number];
-    pci_set_drvdata(dev, data);
+    pci_set_drvdata(pdev, data);
 
+    memset(data, 0, sizeof(device_data));
     data->number = dev_number;
     data->bar = bar;
     cdev_init(&data->cdev, &doom_ops);
     data->cdev.owner = THIS_MODULE;
+    data->pdev = pdev;
+    INIT_LIST_HEAD(&data->changes_queue);
 
     /* TODO: setup device before cdev_add */
 
@@ -847,15 +822,14 @@ static int pci_probe(struct pci_dev* dev, const struct pci_device_id* id) {
         goto out_cdev_add;
     }
 
-    /* TODO: store device? */
-    device = device_create(&doom_class, dev->dev, doom_major + dev_number, 0, CHRDEV_NAME "%d", dev_number);
+    device = device_create(&doom_class, &pdev->dev, doom_major + dev_number, 0, CHRDEV_NAME "%d", dev_number);
     if (IS_ERR(device)) {
         DEBUG("can't create device");
         err = PTR_ERR(device);
         goto err_device;
     }
 
-    if ((err = request_irq(dev->irq, doom_irq_handler, IRQF_SHARED, CHRDEV_NAME, data))) {
+    if ((err = request_irq(pdev->irq, doom_irq_handler, IRQF_SHARED, CHRDEV_NAME, data))) {
         DEBUG("can't setup interrupt handler");
         goto err_irq;
     }
@@ -867,15 +841,15 @@ err_irq:
 err_device:
     cdev_del(&data->cdev);
 out_cdev_add:
-    pci_set_drvdata(dev, NULL);
+    pci_set_drvdata(pdev, NULL);
     /* TODO */
 out_dma:
-    pci_clear_master(dev);
-    pci_iounmap(dev, data->bar);
+    pci_clear_master(pdev);
+    pci_iounmap(pdev, data->bar);
 out_iomap:
-    pci_release_regions(dev);
+    pci_release_regions(pdev);
 out_regions:
-    pci_disable_device(dev);
+    pci_disable_device(pdev);
 out_enable:
     return err;
 }
