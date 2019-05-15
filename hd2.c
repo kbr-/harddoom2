@@ -237,7 +237,7 @@ int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t wi
     return fd;
 
 out_getfd:
-    free_buff(buff);
+    free_buffer(buff);
 out_buff:
     kfree(buff);
     return err;
@@ -680,7 +680,7 @@ static ssize_t doom_write(struct file* file, const char __user* _buf, size_t cou
         goto out_copy;
     }
 
-    uint32_t write_idx = ioread32(bar + HARDDOOM2_CMD_WRITE_IDX);
+    uint32_t write_idx = ioread32(ctx->devdata->bar + HARDDOOM2_CMD_WRITE_IDX);
 
     uint32_t free_cmds;
     /* TODO wait_for_cmd_buffer should never fail */
@@ -835,6 +835,27 @@ irqreturn_t doom_irq_handler(int irq, void* devdata) {
     return IRQ_NONE;
 }
 
+void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
+    iowrite32(0, bar + HARDDOOM2_FE_CODE_ADDR);
+    for (int i = 0; i < sizeof(doomcode2) / sizeof(uint32_t); ++i) {
+        iowrite32(doomcode2[i], bar + HARDDOOM2_FE_CODE_WINDOW);
+    }
+    iowrite32(HARDDOOM2_RESET_ALL, bar + HARDDOOM2_RESET);
+
+    iowrite(cmds_page_table >> 8, bar + HARDDOOM2_CMD_PT);
+    iowrite(0, bar + HARDDOOM2_CMD_READ_IDX);
+    iowrite(0, bar + HARDDOOM2_CMD_WRITE_IDX);
+    iowrite(HARDDOOM2_INTR_MASK, bar + HARDDOOM2_INTR);
+    iowrite(0, bar + HARDDOOM2_FENCE_COUNTER);
+    iowrite(HARDDOOM2_ENABLE_ALL, bar + HARDDOOM2_ENABLE);
+}
+
+void device_off(void __iomem* bar) {
+    iowrite32(0, bar + HARDDOOM2_ENABLE);
+    iowrite32(0, bar + HARDDOOM2_INTR_ENABLE);
+    ioread32(bar + HARDDOOM2_ENABLE);
+}
+
 static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     int err = 0;
     void __iomem bar* = NULL;
@@ -898,10 +919,15 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     data->cdev.owner = THIS_MODULE;
     data->pdev = pdev;
 
+    if ((err = init_buffer(&data->cmd_buff, &pdev->dev, MAX_BUFFER_SIZE))) {
+        DEBUG("can't init cmd_buff");
+        goto out_cmd_buff;
+    }
+
     init_waitqueue_head(&data->cmd_wait_queue);
     INIT_LIST_HEAD(&data->changes_queue);
 
-    /* TODO: setup device before cdev_add */
+    reset_device(bar, data->cmd_buff->page_table_dev);
 
     if ((err = cdev_add(&data->cdev, doom_major + dev_number, 1))) {
         DEBUG("can't register cdev");
@@ -927,6 +953,9 @@ err_irq:
 err_device:
     cdev_del(&data->cdev);
 out_cdev_add:
+    device_off(bar);
+    free_buffer(&data->cmd_buff);
+out_cmd_buff:
     pci_set_drvdata(pdev, NULL);
     /* TODO */
 out_dma:
