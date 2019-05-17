@@ -1,29 +1,9 @@
+#include "buffer.h"
 
-struct buffer {
-    void* pages_kern[1024];
-    dma_addr_t pages_dev[1024];
-
-    void* page_table_kern;
-    dma_addr_t page_table_dev;
-
-    struct harddoom2* dev;
-
-    size_t size;
-
-    struct counter last_use;
-    struct counter last_write;
-
-    /* Non-zero values indicate that this is a surface buffer.
-       Zero indicates any other type of buffer (cmd, texture, etc.).
-       Used to check correctness of received setups */
-    uint16_t width;
-    uint16_t height;
-};
-
-int init_buffer(struct buffer* buff, struct harddoom2* devdata, size_t size) {
+int init_buffer(struct buffer* buff, struct harddoom2* hd2, size_t size) {
     if (size > MAX_BUFFER_SIZE) { ERROR("bad init_buffer"); return -EINVAL; }
 
-    struct device* dev = &devdata->pdev->dev;
+    struct device* dev = &hd2->pdev->dev;
 
     buff->page_table_kern = dma_alloc_coherent(dev, PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
     if (!buff->page_table_kern) {
@@ -45,7 +25,7 @@ int init_buffer(struct buffer* buff, struct harddoom2* devdata, size_t size) {
         page_table[page] = (uint32_t)(buff->pages_dev[page] >> 4) | 3; /* TODO: think about this */
     }
 
-    buff->dev = devdata;
+    buff->hd2 = hd2;
     buff->size = size;
     buff->last_use.val = 0;
     buff->last_write.val = 0;
@@ -67,15 +47,15 @@ out_table:
 }
 
 void free_buffer(struct buffer* buff) {
-    struct device* dev = &buff->dev->pdev->dev;
+    struct device* dev = &buff->hd2->pdev->dev;
     size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     size_t page;
     for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(buff->dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
     }
 
-    dma_free_coherent(buff->dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
+    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
 }
 
 int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
