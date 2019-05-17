@@ -44,6 +44,8 @@ struct harddoom2 {
 
     uint32_t write_idx;
 
+    struct counter batch_cnt;
+
     struct counter last_fence_cnt;
     struct counter last_fence_wait;
 
@@ -67,7 +69,9 @@ struct buffer_change {
     /* NULL pointer represents no change. */
     /* Non-NULL pointer indicates what buffer was used BEFORE the change. */
     struct file* bufs[NUM_USER_BUFS];
-    uint32_t cmd_number;
+
+    /* Number of the batch in which this set of buffers was removed */
+    struct counter cnt;
 
     struct list_head list;
 }
@@ -401,6 +405,75 @@ static void hd2_cleanup(void)
 module_init(hd2_init);
 module_exit(hd2_cleanup);
 
+int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
+    int has_change = 0;
+    int is_diff = 0;
+
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i].file != hd2->curr_bufs[i]) {
+            is_diff = 1;
+            if (hd2->curr_bufs[i]) {
+                has_change = 1;
+                break;
+            }
+        }
+    }
+
+    if (!is_diff) {
+        return 0;
+    }
+
+    struct buffer_change* change = NULL;
+    if (has_change) {
+        change = kzalloc(sizeof(struct buffer_change), GFP_KERNEL);
+        if (!change) {
+            return -ENOMEM;
+        }
+        change->cnt = hd2->batch_cnt;
+
+        list_add_tail(&change->list, &hd2->changes_queue);
+    }
+
+    struct cmd dev_cmd = make_setup(bufs, extra_flags);
+    write_cmd(hd2, &dev_cmd, write_idx);
+
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i].file == hd2->curr_bufs[i]) continue;
+
+        if (bufs[i].file) {
+            fget(bufs[i].file);
+        }
+        if (hd2->curr_bufs[i]) {
+            change->bufs[i] = hd2->curr_bufs[i];
+        }
+        hd2->curr_bufs[i] = bufs[i].file;
+    }
+
+    return 1;
+}
+
+void collect_buffers(struct harddoom2* hd2) {
+    struct counter cnt = get_curr_fence_cnt(hd2);
+    while (!list_empty(&hd2->changes_queue)) {
+        struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
+
+        if (!cnt_ge(counter, change->cnt)) {
+            return;
+        }
+
+        int i;
+        for (i = 0; i < NUM_USER_BUFS; ++i) {
+            if (change->bufs[i]) {
+                fput(change->bufs[i]);
+            }
+        }
+
+        list_del(&change->list);
+        kfree(change);
+    }
+}
+
 struct cmd {
     uint32_t data[8];
 };
@@ -455,35 +528,6 @@ void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
     return write_buffer(buff, cmd->data, dst_pos, sizeof(cmd->data));
 }
 
-void collect_buffers(struct harddoom2* hd2) {
-    uint32_t counter = ioread32(hd2->bar + HARDDOOM2_FENCE_COUNTER);
-    while (!list_empty(&hd2->changes_queue)) {
-        struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
-
-        /* If counter is in the range [cmd_number, ..., cmd_number + 3 * CMD_BUF_SIZE] (mod 2^32),
-           then cmd_number is not in the range [counter + 1, ..., counter + CMD_BUF_SIZE + 2048 (mod 2^32)],
-           so this SETUP was already processed by the device and we can collect previous buffers.
-
-           If counter is not in the range [cmd_number, ..., cmd_number + 3 * CMD_BUF_SIZE],
-           this SETUP couldn't have been processed yet: if it had, at least one
-           collect_buffers would have been called while counter was still in this range,
-           so the command would not be in the queue. */
-        if (!in_range(counter, change->cmd_number, change->cmd_number + 3 * CMD_BUF_SIZE)) {
-            return;
-        }
-
-        int i;
-        for (i = 0; i < NUM_USER_BUFS; ++i) {
-            if (change->bufs[i]) {
-                fput(change->bufs[i]);
-            }
-        }
-
-        list_del(&change->list);
-        kfree(change);
-    }
-}
-
 static struct cmd make_setup(struct fd* bufs, uint32_t extra_flags) {
     static const uint32_t bufs_flags[NUM_USER_BUFS] = {
         HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
@@ -521,59 +565,6 @@ static struct cmd make_setup(struct fd* bufs, uint32_t extra_flags) {
     return hd_cmd;
 }
 
-int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
-    int has_change = 0;
-    int is_diff = 0;
-
-    int i;
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i].file != hd2->curr_bufs[i]) {
-            is_diff = 1;
-            if (hd2->curr_bufs[i]) {
-                has_change = 1;
-                break;
-            }
-        }
-    }
-
-    if (!is_diff) {
-        return 0;
-    }
-
-    struct buffer_change* change = NULL;
-    if (has_change) {
-        change = kzalloc(sizeof(struct buffer_change), GFP_KERNEL);
-        if (!change) {
-            return -ENOMEM;
-        }
-        list_add_tail(&change->list, &ctx->hd2->changes_queue);
-    }
-
-    struct cmd cmd = make_setup(ctx->bufs, extra_flags);
-    int err;
-    if ((err = write_cmd(ctx->hd2, &cmd, write_idx))) /* TODO: this should not fail */ {
-        if (change) {
-            list_del(&change->list);
-            kfree(change);
-            return err;
-        }
-    }
-
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i].file == hd2->curr_bufs[i]) continue;
-
-        if (bufs[i].file) {
-            fget(bufs[i].file);
-        }
-        if (hd2->curr_bufs[i]) {
-            change->bufs[i] = hd2->curr_bufs[i];
-        }
-        hd2->curr_bufs[i] = bufs[i].file;
-    }
-
-    return 1;
-}
-
 uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
     return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - hd2->write_idx - 1;
 }
@@ -591,6 +582,8 @@ void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
 }
 
 ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doomdev2_cmd* cmds, size_t num_cmds) {
+    update_last_fence_cnt(hd2);
+
     /* TODO mutex lock */
     while (get_cmd_buf_space(hd2) < 2) {
         deactivate_intr(HARDDOOM2_INTR_PONG_ASYNC);
@@ -637,12 +630,13 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doo
         extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
     }
 
-    extra_flags |= HARDDOOM2-CMD_FLAG_FENCE;
+    extra_flags |= HARDDOOM2_CMD_FLAG_FENCE;
     make_cmd(&dev_cmd, &cmds[it], extra_flags);
     write_cmd(hd2, &dev_cmd, write_idx);
 
     hd2->write_idx = write_idx;
     iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    cnt_incr(&hd2->batch_cnt);
 
     /* TODO do this outside lock? */
     collect_buffers(ctx->hd2);

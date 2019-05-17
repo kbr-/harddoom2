@@ -20,10 +20,6 @@ void update_last_fence_cnt(struct harddoom2* hd2) {
     _update_last_fence_cnt(hd2);
 }
 
-bool cnt_ge(struct counter cnt1, struct counter cnt2) {
-    return cnt1.val >= cnt2.val;
-}
-
 void bump_fence_wait(struct harddoom2* hd2, struct counter cnt) {
     /* TODO spinlock */
     if (!cnt_ge(cnt, hd2->last_fence_wait)) {
