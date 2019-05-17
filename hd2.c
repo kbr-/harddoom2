@@ -118,7 +118,9 @@ irqreturn_t doom_irq_handler(int irq, void* _hd2) {
     struct harddoom2* hd2 = _hd2;
     BUG_ON(!hd2);
 
+    /* TODO synchro */
     uint32_t active = ioread32(hd2->bar + HARDDOOM2_INTR);
+    iowrite32(active, hd2->bar + HARDDOOM2_INTR);
 
     int served = 0;
     for (int i = 0; i < NUM_INTR_BITS; ++i) {
@@ -129,9 +131,7 @@ irqreturn_t doom_irq_handler(int irq, void* _hd2) {
         }
     }
 
-    /* TODO synchro */
     if (served) {
-        iowrite32(active, hd2->bar + HARDDOOM2_INTR);
         return IRQ_HANDLED;
     }
 
@@ -400,7 +400,7 @@ static void hd2_cleanup(void)
 module_init(hd2_init);
 module_exit(hd2_cleanup);
 
-int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
+static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
     int has_change = 0;
     int is_diff = 0;
 
@@ -448,7 +448,7 @@ int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint
     return 1;
 }
 
-void collect_buffers(struct harddoom2* hd2) {
+static void collect_buffers(struct harddoom2* hd2) {
     struct counter cnt = get_curr_fence_cnt(hd2);
     while (!list_empty(&hd2->changes_queue)) {
         struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
@@ -514,7 +514,7 @@ static void make_cmd(struct cmd* dev_cmd, const struct doomdev2_cmd* user_cmd, u
     }
 }
 
-void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
+static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
     struct buffer* buff = &hd2->cmd_buff;
     BUG_ON(write_idx >= CMD_BUF_SIZE);
     BUG_ON(buff->size != CMD_BUF_SIZE);
@@ -560,7 +560,7 @@ static struct cmd make_setup(struct fd* bufs, uint32_t extra_flags) {
     return hd_cmd;
 }
 
-uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
+static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
     return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - hd2->write_idx - 1;
 }
 
