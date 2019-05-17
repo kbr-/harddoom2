@@ -6,9 +6,12 @@ struct buffer {
     void* page_table_kern;
     dma_addr_t page_table_dev;
 
+    struct harddoom2* dev;
+
     size_t size;
 
-    struct device* dev;
+    struct counter last_use;
+    struct counter last_write;
 
     /* Non-zero values indicate that this is a surface buffer.
        Zero indicates any other type of buffer (cmd, texture, etc.).
@@ -17,8 +20,10 @@ struct buffer {
     uint16_t height;
 };
 
-int init_buffer(struct buffer* buff, struct device* dev, size_t size) {
+int init_buffer(struct buffer* buff, struct harddoom2* devdata, size_t size) {
     if (size > MAX_BUFFER_SIZE) { ERROR("bad init_buffer"); return -EINVAL; }
+
+    struct device* dev = &devdata->pdev->dev;
 
     buff->page_table_kern = dma_alloc_coherent(dev, PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
     if (!buff->page_table_kern) {
@@ -40,8 +45,10 @@ int init_buffer(struct buffer* buff, struct device* dev, size_t size) {
         page_table[page] = (uint32_t)(buff->pages_dev[page] >> 4) | 3; /* TODO: think about this */
     }
 
+    buff->dev = devdata;
     buff->size = size;
-    buff->dev = dev;
+    buff->last_use.val = 0;
+    buff->last_write.val = 0;
     buff->width = 0;
     buff->height = 0;
 
@@ -60,9 +67,10 @@ out_table:
 }
 
 void free_buffer(struct buffer* buff) {
+    struct device* dev = &buff->dev->pdev->dev;
     size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
+
     size_t page;
-    /* TODO: dev might be gone */
     for (page = 0; page < num_pages; ++page) {
         dma_free_coherent(buff->dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
     }

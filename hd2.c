@@ -7,7 +7,7 @@ MODULE_LICENSE("GPL");
 #define DEBUG(fmt, ...) printk(KERN_INFO "hd2: " fmt "\n", ##__VA_ARGS__)
 #define ERROR(fmt, ...) printk(KERN_ERR "hd2: " fmt "\n", ##__VA_ARGS__)
 #define DRV_NANE "harddoom2_driver"
-#define CHRDEV_NAME "doom"
+#define CHRDEV_NAME "HardDoom_][™"
 #define DEVICES_LIMIT 256
 #define MAX_KMALLOC (128 * 1024)
 #define PAGE_SIZE (4 * 1024)
@@ -29,7 +29,23 @@ static struct class doom_class = {
     .owner = THIS_MODULE,
 };
 
-struct device_data {
+struct counter {
+    uint64_t val;
+};
+
+uint32_t cnt_lower(struct counter cnt) {
+    return cnt.val;
+}
+
+uint32_t cnt_upper(struct counter cnt) {
+    return cnt.val >> 32;
+}
+
+struct counter make_cnt(uint64_t upper, uint64_t lower) {
+    return { .val = upper << 32 + lower };
+}
+
+struct harddoom2 {
     int number;
     void __iomem* bar;
     struct cdev cdev;
@@ -37,8 +53,14 @@ struct device_data {
 
     struct pci_dev* pdev;
 
+    struct counter last_fence_cnt;
+    struct counter last_fence_wait;
+
     /* Used to wait for free space in the command buffer. */
-    wait_queue_head_t cmd_wait_queue;
+    wait_queue_head_t write_wq;
+
+    /* Used to wait for commands using a particular buffer to finish. */
+    wait_queue_head_t fence_wq;
 
     /* Manages the lifetime of buffers used by the device.
        When a SETUP command is sent to the command queue, we remember the set of changed buffers
@@ -59,11 +81,11 @@ struct buffer_change {
     struct list_head list;
 }
 
-static struct device_data devices[DEVICES_LIMIT];
+static struct harddoom2 devices[DEVICES_LIMIT];
 
 struct context {
     /* TODO? */
-    struct device_data* devdata;
+    struct harddoom2* dev;
 
     struct fd curr_bufs[NUM_USER_BUFS];
 };
@@ -91,6 +113,64 @@ static int buffer_release(struct inode* inode, struct file* file) {
     return 0;
 }
 
+/* Do this at least every 2^32 - 1 commands. Needs to be done under spinlock. */
+void _update_last_fence_cnt(struct harddoom2* dev) {
+    uint32_t curr_lower = ioread32(dev->bar + HARDDOOM2_FENCE_COUNTER);
+    uint32_t last_lower = cnt_lower(dev->last_fence_cnt);
+    if (last_lower > curr_lower) {
+        dev->last_fence_cnt = make_cnt(cnt_upper(dev->last_fence_cnt) + 1, curr_lower);
+    }
+}
+
+void update_last_fence_cnt(struct harddoom2* dev) {
+    /* TODO spinlock */
+    _update_last_fence_cnt(dev);
+}
+
+bool cnt_ge(struct counter cnt1, struct counter cnt2) {
+    return cnt1.val >= cnt2.val;
+}
+
+void bump_fence_wait(struct harddoom2* dev, struct counter cnt) {
+    /* TODO spinlock */
+    if (!cnt_ge(cnt, dev->last_fence_wait)) {
+        goto out;
+    }
+
+    iowrite(cnt_lower(cnt), dev->bar + HARDDOOM2_FENCE_WAIT);
+    dev->last_fence_wait = cnt;
+
+out:
+    /* TODO spinunlock */
+    return;
+}
+
+struct counter get_curr_fence_cnt(struct harddoom2* dev) {
+    struct counter res;
+    /* TODO spinlock */
+    _update_last_fence_cnt(dev);
+    res = dev->last_fence_cnt;
+    /* TODO spinunlock */
+    return res;
+}
+
+void wait_for_fence_cnt(struct harddoom2* dev, struct counter cnt) {
+    if (cnt_ge(get_curr_fence_cnt(dev), cnt)) {
+        return;
+    }
+
+    bump_fence_wait(cnt);
+    if (cnt_ge(get_curr_fence_cnt(dev), cnt)) {
+        return;
+    }
+
+    DEBUG("wait for fence: %lu", cnt.val);
+
+    wait_event(&dev->fence_wq, cnt_ge(get_curr_fence_cnt(dev), cnt));
+
+    DEBUG("wait for fence: %lu finished", cnt.val);
+}
+
 static ssize_t buffer_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
     struct buffer* buff = file->private_data;
     if (!buff) { ERROR("buffer write: no buff!"); return -EINVAL; }
@@ -108,15 +188,15 @@ static ssize_t buffer_write(struct file* file, const char __user* _buff, size_t 
         count = buff_size - *off;
     }
 
-    /* TODO: wait for ops */
-
     if (!count) {
         return -EINVAL;
     }
 
+    wait_for_fence_cnt(&buff->dev, buff->last_use);
+
     size_t ret = 0;
     int err = write_buffer_user(buff, _buff, *off, count, &ret);
-    *off ++ ret;
+    *off += ret;
 
     if (err && !ret) {
         return err;
@@ -148,7 +228,7 @@ static ssize_t buffer_read(struct file* file, char __user *_buff, size_t count, 
         return -EINVAL;
     }
 
-    /* TODO: wait for ops */
+    wait_for_fence_cnt(&buff->dev, buff->last_write);
 
     size_t ret = 0;
     int err = read_buffer_user(buff, _buff, *off, count, &ret);
@@ -196,13 +276,7 @@ static struct file_operations buffer_ops = {
     .llseek = buffer_llseek
 };
 
-struct pci_dev* get_pci_dev(struct context* ctx) {
-    /* TODO might be gone? */
-    return ctx->pdev;
-}
-
-int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t width, uint16_t height) {
-    /* TODO: is 'class' needed? */
+int make_buffer(struct context* ctx, size_t size, uint16_t width, uint16_t height) {
     int err;
 
     struct buffer* buff = kmalloc(sizeof(struct buffer), GFP_KERNEL);
@@ -211,8 +285,7 @@ int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t wi
         return -ENOMEM;
     }
 
-    struct pci_dev* pdev = get_pci_dev(ctx);
-    if ((err = init_buffer(buff, &pdev->dev, size))) {
+    if ((err = init_buffer(buff, ctx->devdata, size))) {
         DEBUG("make_buffer: init_buffer");
         goto out_buff;
     }
@@ -229,7 +302,7 @@ int make_buffer(struct context* ctx, const char* class, size_t size, uint16_t wi
         goto out_getfd;
     }
 
-    struct file* f = anon_inode_getfile(class, buffer_ops, buff, flags);
+    struct file* f = anon_inode_getfile(CHRDEV_NAME, buffer_ops, buff, flags);
     if (IS_ERR(f)) {
         DEBUG("make_buffer: getfile");
         err = PTR_ERR(f);
@@ -267,7 +340,7 @@ static int create_surface(struct context* ctx, struct doomdev2_ioctl_create_surf
         return -EINVAL;
     }
 
-    return make_buffer(ctx, "SURFACE", params,width * params.height, params.width, params.height);
+    return make_buffer(ctx, params,width * params.height, params.width, params.height);
 }
 
 static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
@@ -284,7 +357,7 @@ static int create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffe
         return -EINVAL;
     }
 
-    return make_buffer(ctx, "BUFFER", params.size, 0, 0);
+    return make_buffer(ctx, params.size, 0, 0);
 }
 
 static int wait_for_cmd_buffer(struct context* ctx, uint32_t write_idx, uint32_t* free_cmds) {
@@ -314,7 +387,7 @@ static int wait_for_cmd_buffer(struct context* ctx, uint32_t write_idx, uint32_t
     iowrite(intrs, bar + HARDDOOM2_INTR_ENABLE);
 
     /* TODO interruptible: check if something broke */
-    wait_event(&ctx->cmd_wait_queue,
+    wait_event(&ctx->write_wq,
         (*free_cmds = ioread32(bar + HARDDOOM2_CMD_READ_IDX) - *write_idx - 1) >= 2);
 
     intrs = ioread32(bar + HARDDOOM2_INTR_ENABLE);
@@ -566,7 +639,7 @@ static bool in_range(uint32_t x, uint32_t start, uint32_t end) {
     return start <= x || x <= end;
 }
 
-static void collect_buffers(struct device_data* dev) {
+static void collect_buffers(struct harddoom2* dev) {
     uint32_t counter = ioread32(dev->bar + HARDDOOM2_FENCE_COUNTER);
     while (!list_empty(&dev->changes_queue)) {
         struct buffer_change* change = list_first_entry(&dev->changes_queue, struct buffer_change, list);
@@ -770,38 +843,27 @@ int alloc_dev_number() {
     return ret;
 }
 
-/* A handler returns the associated bit if the interrupt should still be enabled or zero otherwise. */
-typedef uint32_t (*doom_irq_handler_t)(struct device_data*, uint32_t);
+typedef void (*doom_irq_handler_t)(struct harddoom2*, uint32_t);
 
-uint32_t handle_fence(struct device_data* data, uint32_t bit) {
+uint32_t handle_fence(struct harddoom2* data, uint32_t bit) {
     DEBUG("pong_fence");
-    /* TODO */
-    return 0;
+
+    wake_up(&data->fence_wq);
 }
 
-uint32_t handle_pong_sync(struct device_data* data, uint32_t bit) {
+uint32_t handle_pong_sync(struct harddoom2* data, uint32_t bit) {
     DEBUG("pong_sync");
     /* TODO */
-    return 0;
 }
 
-uint32_t handle_pong_async(struct device_data* data, uint32_t bit) {
-    /* TODO synchro */
+uint32_t handle_pong_async(struct harddoom2* data, uint32_t bit) {
     DEBUG("pong_async");
 
-    uint32_t write_idx = ioread32(bar + HARDDOOM2_CMD_WRITE_IDX);
-    uint32_t read_idx = ioread32(bar + HARDDOOM2_CMD_READ_IDX);
-    if (read_idx - write_idx - 1 >= 2) {
-        wake_up(&data->cmd_wait_queue);
-        return 0;
-    }
-
-    return bit;
+    wake_up(&data->write_wq);
 }
 
-uint32_t handle_impossible(struct device_data* data, uint32_t bit) {
+uint32_t handle_impossible(struct harddoom2* data, uint32_t bit) {
     ERROR("Impossible interrupt: %u", bit);
-    return 0;
 }
 
 irqreturn_t doom_irq_handler(int irq, void* devdata) {
@@ -817,7 +879,7 @@ irqreturn_t doom_irq_handler(int irq, void* devdata) {
         [3 ... (NUM_INTR_BITS - 1)] = handle_impossible };
 
     /* TODO */
-    struct device_data* data = devdata;
+    struct harddoom2* data = devdata;
     if (!dev) {
         ERROR("No data in irq_handler!");
         BUG();
@@ -829,7 +891,7 @@ irqreturn_t doom_irq_handler(int irq, void* devdata) {
     for (int i = 0; i < NUM_INTR_BITS; ++i) {
         uint32_t bit = intr_bits[i];
         if (bit & active) {
-            active &= ~intr_handlers[i](data, bit);
+            intr_handlers[i](data, bit);
             served = 1;
         }
     }
@@ -864,7 +926,7 @@ void device_off(void __iomem* bar) {
     ioread32(bar + HARDDOOM2_ENABLE);
 }
 
-void free_all_buffers(struct device_data* data) {
+void free_all_buffers(struct harddoom2* data) {
     free_buffer(&data->cmd_buff);
 
     for (int i = 0; i < NUM_USER_BUFS; ++i) {
@@ -886,7 +948,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     int err = 0;
     void __iomem bar* = NULL;
     struct device* device = NULL;
-    struct device_data* data = NULL;
+    struct harddoom2* data = NULL;
     int dev_number = DEVICE_LIMIT;
 
     DEBUG("probe called: %#010x, %#0x10x", id->vendor, id->device);
@@ -938,7 +1000,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     data = &devices[dev_number];
     pci_set_drvdata(pdev, data);
 
-    memset(data, 0, sizeof(device_data));
+    memset(data, 0, sizeof(harddoom2));
     data->number = dev_number;
     data->bar = bar;
     cdev_init(&data->cdev, &doom_ops);
@@ -950,7 +1012,8 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
         goto out_cmd_buff;
     }
 
-    init_waitqueue_head(&data->cmd_wait_queue);
+    init_waitqueue_head(&data->write_wq);
+    init_waitqueue_head(&data->fence_wq);
     INIT_LIST_HEAD(&data->changes_queue);
 
     reset_device(bar, data->cmd_buff->page_table_dev);
@@ -997,7 +1060,7 @@ out_enable:
 
 static void pci_remove(struct pci_dev* dev) {
     /* TODO collect changes */
-    struct device_data* data = pci_get_drvdata(dev);
+    struct harddoom2* data = pci_get_drvdata(dev);
     void __iomem* bar = NULL;
 
     if (!data) {
