@@ -115,12 +115,8 @@ irqreturn_t doom_irq_handler(int irq, void* _hd2) {
         handle_fence, handle_impossible, handle_pong_async,
         [3 ... (NUM_INTR_BITS - 1)] = handle_impossible };
 
-    /* TODO */
     struct harddoom2* hd2 = _hd2;
-    if (!hd2) {
-        ERROR("No data in irq_handler!");
-        BUG();
-    }
+    BUG_ON(!hd2);
 
     uint32_t active = ioread32(hd2->bar + HARDDOOM2_INTR);
 
@@ -296,7 +292,6 @@ out_enable:
 }
 
 static void pci_remove(struct pci_dev* dev) {
-    /* TODO collect changes */
     struct harddoom2* hd2 = pci_get_drvdata(dev);
     void __iomem* bar = NULL;
 
@@ -637,6 +632,16 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doo
     hd2->write_idx = write_idx;
     iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
     cnt_incr(&hd2->batch_cnt);
+
+    ((struct buffer*)hd2->curr_bufs[0]->private_data)->last_write = hd2->batch_cnt;
+
+    /* TODO: update buffers that were actually used */
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if(hd2->curr_bufs[i]) {
+            ((struct buffer*)hd2->curr_bufs[i]->private_data)->last_use = hd2->batch_cnt;
+        }
+    }
 
     /* TODO do this outside lock? */
     collect_buffers(ctx->hd2);

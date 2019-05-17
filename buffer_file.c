@@ -99,7 +99,11 @@ static ssize_t buffer_write(struct file* file, const char __user* _buff, size_t 
         return -EINVAL;
     }
 
-    wait_for_fence_cnt(&buff->hd2, buff->last_use);
+    /* TODO mutex lock */
+    struct counter last_use = buff->last_use;
+    /* unlock */
+
+    wait_for_fence_cnt(&buff->hd2, last_use);
     /* Someone might have moved buff->last_use forward by now, but we don't care.
        It's the user's responsibility not to send any more commands using this buffer
        in the middle of a buffer_write or buffer_read call. */
@@ -138,7 +142,11 @@ static ssize_t buffer_read(struct file* file, char __user *_buff, size_t count, 
         return -EINVAL;
     }
 
-    wait_for_fence_cnt(&buff->hd2, buff->last_write);
+    /* TODO mutex lock */
+    struct counter last_write = buff->last_write;
+    /* unlock */
+
+    wait_for_fence_cnt(&buff->hd2, last_write);
     /* See comment in buffer_write. */
 
     size_t ret = 0;
