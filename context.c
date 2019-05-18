@@ -1,3 +1,7 @@
+#include "context.h"
+
+#define MAX_KMALLOC (128 * 1024)
+
 static int context_open(struct inode* inode, struct file* file);
 static int context_release(struct inode* inode, struct file* file);
 static int context_ioctl(struct file* file, unsigned cmd, unsigned long arg);

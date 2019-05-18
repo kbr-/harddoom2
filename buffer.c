@@ -1,3 +1,4 @@
+#include "harddoom2.h"
 #include "buffer.h"
 
 int init_buffer(struct buffer* buff, struct harddoom2* hd2, size_t size) {
@@ -5,7 +6,7 @@ int init_buffer(struct buffer* buff, struct harddoom2* hd2, size_t size) {
 
     struct device* dev = &hd2->pdev->dev;
 
-    buff->page_table_kern = dma_alloc_coherent(dev, PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
+    buff->page_table_kern = dma_alloc_coherent(dev, HARDDOOM2_PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
     if (!buff->page_table_kern) {
         DEBUG("init_buffer: page_table_kern");
         goto out_table;
@@ -13,10 +14,10 @@ int init_buffer(struct buffer* buff, struct harddoom2* hd2, size_t size) {
 
     uint32_t* page_table = (uint32_t*)buff->page_table_kern;
 
-    size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t num_pages = (size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE;
     size_t page;
     for (page = 0; page < num_pages; ++page) {
-        void* buff->pages_kern[page] = dma_alloc_coherent(dev, PAGE_SIZE, &buff->pages_dev[page], GFP_KERNEL);
+        void* buff->pages_kern[page] = dma_alloc_coherent(dev, HARDDOOM2_PAGE_SIZE, &buff->pages_dev[page], GFP_KERNEL);
         if (!page_kern) {
             DEBUG("init_buffer: page_kern");
             goto out_pages;
@@ -37,33 +38,33 @@ int init_buffer(struct buffer* buff, struct harddoom2* hd2, size_t size) {
 out_pages:
     num_pages = page;
     for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+        dma_free_coherent(dev, HARDDOOM2_PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
     }
 
 out_table:
-    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
+    dma_free_coherent(dev, HARDDOOM2_PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
 
     return -ENOMEM;
 }
 
 void free_buffer(struct buffer* buff) {
     struct device* dev = &buff->hd2->pdev->dev;
-    size_t num_pages = (buff->size + PAGE_SIZE - 1) / PAGE_SIZE;
+    size_t num_pages = (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE;
 
     size_t page;
     for (page = 0; page < num_pages; ++page) {
-        dma_free_coherent(dev, PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
+        dma_free_coherent(dev, HARDDOOM2_PAGE_SIZE, buff->pages_kern[page], buff->pages_dev[page]);
     }
 
-    dma_free_coherent(dev, PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
+    dma_free_coherent(dev, HARDDOOM2_PAGE_SIZE, buff->page_table_kern, buff->page_table_dev);
 }
 
 int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
     if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
 
-    size_t page = dst_pos / PAGE_SIZE;
-    size_t page_off = dst_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
+    size_t page = dst_pos / HARDDOOM2_PAGE_SIZE;
+    size_t page_off = dst_pos % HARDDOOM2_PAGE_SIZE;
+    size_t space_in_page = HARDDOOM2_PAGE_SIZE - page_off;
     void* dst = pages_kern[page] + page_off;
 
     while (size) {
@@ -76,7 +77,7 @@ int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
         size -= space_in_page;
 
         dst = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
+        space_in_page = HARDDOOM2_PAGE_SIZE;
     }
 
     return 0;
@@ -85,9 +86,9 @@ int write_buffer(struct buffer* buff, void* src, size_t dst_pos, size_t size) {
 int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, size_t size, size_t* bytes_transferred) {
     if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
 
-    size_t page = src_pos / PAGE_SIZE;
-    size_t page_off = src_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
+    size_t page = src_pos / HARDDOOM2_PAGE_SIZE;
+    size_t page_off = src_pos % HARDDOOM2_PAGE_SIZE;
+    size_t space_in_page = HARDDOOM2_PAGE_SIZE - page_off;
     void* src = pages_kern[page] + page_off;
     *bytes_transferred = 0;
 
@@ -107,7 +108,7 @@ int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, siz
         size -= space_in_page;
 
         dst = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
+        space_in_page = HARDDOOM2_PAGE_SIZE;
     }
 
     return 0;
@@ -117,9 +118,9 @@ int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, siz
 int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size_t size, size_t* bytes_transferred) {
     if (src_pos >= buff->size || size > buff->size || src_pos + size > buff->size) { ERROR("bad read_buffer!"); return -EINVAL; }
 
-    size_t page = src_pos / PAGE_SIZE;
-    size_t page_off = src_pos % PAGE_SIZE;
-    size_t space_in_page = PAGE_SIZE - page_off;
+    size_t page = src_pos / HARDDOOM2_PAGE_SIZE;
+    size_t page_off = src_pos % HARDDOOM2_PAGE_SIZE;
+    size_t space_in_page = HARDDOOM2_PAGE_SIZE - page_off;
     void* src = pages_kern[page] + page_off;
     *bytes_transferred = 0;
 
@@ -139,7 +140,7 @@ int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size
         size -= space_in_page;
 
         src = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
+        space_in_page = HARDDOOM2_PAGE_SIZE;
     }
 
     return 0;

@@ -1,28 +1,27 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 
+#include "doomcode2.h"
 #include "harddoom2.h"
 
+#include "context.h"
 #include "counter.h"
 #include "buffer.h"
 #include "hd2.h"
 
 MODULE_LICENSE("GPL");
 
-#define DEBUG(fmt, ...) printk(KERN_INFO "hd2: " fmt "\n", ##__VA_ARGS__)
-#define ERROR(fmt, ...) printk(KERN_ERR "hd2: " fmt "\n", ##__VA_ARGS__)
 #define DRV_NANE "harddoom2_driver"
-#define CHRDEV_NAME "HardDoom_][™"
 #define DEVICES_LIMIT 256
-#define MAX_KMALLOC (128 * 1024)
-#define PAGE_SIZE (4 * 1024)
-#define MAX_BUFFER_SIZE (4 * 1024 * 1024)
 #define NUM_USER_BUFS 7
 #define PING_PERIOD (2048 + 32)
-#define NUM_INTR_BITS 15
+
+struct cmd {
+    uint32_t data[8];
+};
 
 /* 128K */
-#define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (8 * 4))
+#define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (sizeof(struct cmd)))
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },
@@ -34,6 +33,7 @@ static struct class doom_class = {
     .owner = THIS_MODULE,
 };
 
+/* Represents a single device. */
 struct harddoom2 {
     int number;
     void __iomem* bar;
@@ -78,7 +78,7 @@ struct buffer_change {
 
 static struct harddoom2 devices[DEVICES_LIMIT];
 
-// static int dev_counter = 0;
+static int dev_counter = 0;
 // static DEFINE_MUTEX(dev_counter_mut);
 
 int alloc_dev_number() {
@@ -93,25 +93,35 @@ int alloc_dev_number() {
 
 typedef void (*doom_irq_handler_t)(struct harddoom2*, uint32_t);
 
-void handle_pong_async(struct harddoom2* data, uint32_t bit) {
-    DEBUG("pong_async");
+void handle_fence(struct harddoom2* hd2, uint32_t bit) {
+    DEBUG("handle fence");
 
-    wake_up(&data->write_wq);
+    wake_up(&hd2->fence_wq);
 }
 
-void handle_impossible(struct harddoom2* data, uint32_t bit) {
+void handle_pong_async(struct harddoom2* hd2, uint32_t bit) {
+    DEBUG("pong_async");
+
+    wake_up(&hd2->write_wq);
+}
+
+void handle_impossible(struct harddoom2* hd2, uint32_t bit) {
     ERROR("Impossible interrupt: %u", bit);
+    BUG();
 }
 
 irqreturn_t doom_irq_handler(int irq, void* _hd2) {
-    static const uint32_t intr_bits[NUM_INTR_BITS] = {
+    static const uint32_t intr_bits[] = {
         HARDDOOM2_INTR_FENCE, HARDDOOM2_INTR_PONG_SYNC, HARDDOOM2_INTR_PONG_ASYNC,
         HARDDOOM2_INTR_FE_ERROR, HARDDOOM2_INTR_CMD_OVERFLOW, HARDDOOM2_INTR_SURF_DST_OVERFLOW,
         HARDDOOM2_INTR_SURF_SRC_OVERFLOW, HARDDOOM2_INTR_PAGE_FAULT_CMD, HARDDOOM2_INTR_PAGE_FAULT_SURF_DST,
         HARDDOOM2_PAGE_FAULT_SURF_SRC, HARDDOOM2_PAGE_FAULT_TEXTURE, HARDDOOM2_PAGE_FAULT_FLAT,
         HARDDOOM2_PAGE_FAULT_TRANSLATION, HARDDOOM2_PAGE_FAULT_COLORMAP, HARDDOOM2_PAGE_FAULT_TRANMAP };
 
-    static const doom_irq_handler_t[NUM_INTR_BITS] = {
+    static const uint32_t NUM_INTR_BITS = sizeof(intr_bits) / size_of(uint32_t);
+    _Static_assert(NUM_INTR_BITS == 15, "num intr bits");
+
+    static const doom_irq_handler_t intr_handlers[NUM_INTR_BITS] = {
         handle_fence, handle_impossible, handle_pong_async,
         [3 ... (NUM_INTR_BITS - 1)] = handle_impossible };
 
@@ -139,17 +149,24 @@ irqreturn_t doom_irq_handler(int irq, void* _hd2) {
 }
 
 void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
+    static const int DOOMCODE2_LEN = sizeof(doomcode2) / sizeof(uint32_t);
+
     iowrite32(0, bar + HARDDOOM2_FE_CODE_ADDR);
-    for (int i = 0; i < sizeof(doomcode2) / sizeof(uint32_t); ++i) {
+    for (int i = 0; i < DOOMCODE2_LEN; ++i) {
         iowrite32(doomcode2[i], bar + HARDDOOM2_FE_CODE_WINDOW);
     }
     iowrite32(HARDDOOM2_RESET_ALL, bar + HARDDOOM2_RESET);
 
     iowrite(cmds_page_table >> 8, bar + HARDDOOM2_CMD_PT);
+    iowrite(CMD_BUF_SIZE, bar + HARDDOOM2_CMD_SIZE);
     iowrite(0, bar + HARDDOOM2_CMD_READ_IDX);
     iowrite(0, bar + HARDDOOM2_CMD_WRITE_IDX);
+
     iowrite(HARDDOOM2_INTR_MASK, bar + HARDDOOM2_INTR);
+    iowrite(HARDDOOM2_INTR_MASK & ~HARDDOOM2_INTR_PONG_ASYNC, bar + HARDDOOM2_INTR_ENABLE);
+
     iowrite(0, bar + HARDDOOM2_FENCE_COUNTER);
+
     iowrite(HARDDOOM2_ENABLE_ALL, bar + HARDDOOM2_ENABLE);
 }
 
@@ -159,7 +176,7 @@ void device_off(void __iomem* bar) {
     ioread32(bar + HARDDOOM2_ENABLE);
 }
 
-void free_all_buffers(struct harddoom2* hd2) {
+void free_buffers(struct harddoom2* hd2) {
     free_buffer(&hd2->cmd_buff);
 
     for (int i = 0; i < NUM_USER_BUFS; ++i) {
@@ -276,7 +293,7 @@ err_device:
     cdev_del(&hd2->cdev);
 out_cdev_add:
     device_off(bar);
-    free_all_buffers(hd2);
+    free_buffers(hd2);
 out_cmd_buff:
     pci_set_drvdata(pdev, NULL);
     /* TODO */
@@ -313,7 +330,7 @@ static void pci_remove(struct pci_dev* dev) {
 
         /* TODO: what if device gone */
         device_off(bar);
-        free_all_buffers(hd2);
+        free_buffers(hd2);
 
         /* TODO: free dev number */
     }
@@ -468,10 +485,6 @@ static void collect_buffers(struct harddoom2* hd2) {
         kfree(change);
     }
 }
-
-struct cmd {
-    uint32_t data[8];
-};
 
 static void make_cmd(struct cmd* dev_cmd, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
     switch (user_cmd->type) {

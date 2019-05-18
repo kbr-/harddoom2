@@ -1,12 +1,6 @@
 #include "harddoom2.h"
 #include "fence.h"
 
-void handle_fence(struct harddoom2* hd2, uint32_t bit) {
-    DEBUG("handle fence");
-
-    wake_up(&hd2->fence_wq);
-}
-
 static void _update_last_fence_cnt(struct harddoom2* hd2) {
     uint32_t curr_lower = ioread32(hd2->bar + HARDDOOM2_FENCE_COUNTER);
     uint32_t last_lower = cnt_lower(hd2->last_fence_cnt);
