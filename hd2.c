@@ -656,7 +656,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doo
     }
 
     /* TODO do this outside lock? */
-    collect_buffers(ctx->hd2);
+    collect_buffers(hd2);
 
     /* TODO unlock */
 
@@ -668,8 +668,6 @@ out_setup:
 }
 
 int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create_surface __user* _params) {
-    int err;
-
     struct doomdev2_ioctl_create_surface params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
         DEBUG("create surface copy_from_user fail");
@@ -682,12 +680,10 @@ int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create
         return -EINVAL;
     }
 
-    return make_buffer(ctx, params,width * params.height, params.width, params.height);
+    return make_buffer(hd2, params,width * params.height, params.width, params.height);
 }
 
-int harddoom2_create_buffer(struct context* ctx, struct doomdev2_ioctl_create_buffer __user* _params) {
-    int err;
-
+int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_buffer __user* _params) {
     struct doomdev2_ioctl_create_buffer params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_buffer))) {
         DEBUG("create_buffer copy_from_user fail");
@@ -699,5 +695,5 @@ int harddoom2_create_buffer(struct context* ctx, struct doomdev2_ioctl_create_bu
         return -EINVAL;
     }
 
-    return make_buffer(ctx, params.size, 0, 0);
+    return make_buffer(hd2, params.size, 0, 0);
 }
