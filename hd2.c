@@ -179,15 +179,12 @@ void device_off(void __iomem* bar) {
 void free_buffers(struct harddoom2* hd2) {
     free_buffer(&hd2->cmd_buff);
 
-    for (int i = 0; i < NUM_USER_BUFS; ++i) {
-        fput(hd2->last_bufs[i]);
-    }
+    release_user_bufs(hd2->curr_bufs);
 
     while (!list_empty(&hd2->changes_queue)) {
         struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
-        for (int i = 0; i < NUM_USER_BUFS; ++i) {
-            fput(change->bufs[i]);
-        }
+
+        release_user_bufs(change->bufs);
 
         list_del(&change->list);
         kfree(change);
@@ -465,6 +462,14 @@ static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_id
     return 1;
 }
 
+void release_user_bufs(struct file** bufs) {
+    for (int i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i]) {
+            fput(bufs[i]);
+        }
+    }
+}
+
 static void collect_buffers(struct harddoom2* hd2) {
     struct counter cnt = get_curr_fence_cnt(hd2);
     while (!list_empty(&hd2->changes_queue)) {
@@ -474,12 +479,7 @@ static void collect_buffers(struct harddoom2* hd2) {
             return;
         }
 
-        int i;
-        for (i = 0; i < NUM_USER_BUFS; ++i) {
-            if (change->bufs[i]) {
-                fput(change->bufs[i]);
-            }
-        }
+        release_user_bufs(change->bufs);
 
         list_del(&change->list);
         kfree(change);
