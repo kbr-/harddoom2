@@ -14,7 +14,7 @@ MODULE_LICENSE("GPL");
 #define CHRDEV_PREFIX "doom"
 #define DEVICES_LIMIT 256
 #define NUM_USER_BUFS 7
-#define PING_PERIOD (2048 + 32)
+#define PING_PERIOD 2048
 #define HARDDOOM2_ADDR_SIZE 40
 
 /* 128K */
@@ -461,7 +461,8 @@ static int setup_buffers(struct harddoom2* hd2, struct fd* bufs) {
     }
 
     struct cmd dev_cmd = make_setup(hd2->curr_bufs, (hd2->write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC);
-    write_cmd(hd2, &dev_cmd, hd2->write_idx++);
+    write_cmd(hd2, &dev_cmd, hd2->write_idx);
+    hd->write_idx = (hd->write_idx + 1) % CMD_BUF_SIZE;
 
     return 1;
 }
@@ -635,17 +636,18 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doo
         extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
     }
 
+    /* it = num_cmds - 1 */
     extra_flags |= HARDDOOM2_CMD_FLAG_FENCE;
     make_cmd(&dev_cmd, &cmds[it], extra_flags);
     write_cmd(hd2, &dev_cmd, write_idx);
 
-    hd2->write_idx = write_idx;
-    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    hd2->write_idx = (write_idx + 1) % CMD_BUF_SIZE;
+    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
     cnt_incr(&hd2->batch_cnt);
 
     ((struct buffer*)hd2->curr_bufs[0]->private_data)->last_write = hd2->batch_cnt;
 
-    /* TODO: update buffers that were actually used */
+    /* TODO: update only buffers that were actually used */
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
         if(hd2->curr_bufs[i]) {
