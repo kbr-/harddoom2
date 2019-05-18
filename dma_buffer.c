@@ -1,5 +1,7 @@
 #include "dma_buffer.h"
 
+_Static_assert(SSIZE_MAX >= MAX_BUFFER_PAGES * PAGE_SIZE, "ssize_max too small");
+
 int init_dma_buff(struct dma_buffer* buff, size_t size, struct device* dev) {
     BUG_ON(size > MAX_BUFFER_PAGES * PAGE_SIZE);
 
@@ -98,37 +100,66 @@ void write_dma_buff(struct buffer* buff, const void* src, size_t dst_pos, size_t
     return 0;
 }
 
-int write_buffer_user(struct buffer* buff, void __user* src, size_t dst_pos, size_t size, size_t* bytes_transferred) {
-    if (dst_pos >= buff->size || size > buff->size || dst_pos + size > buff->size) { ERROR("bad write_buffer!"); return -EINVAL; }
+ssize_t write_dma_buff_user(struct buffer* buff, const void __user* src, size_t dst_pos, size_t size) {
+    BUG_ON(dst_pos + size < dst_pos || dst_pos + size > buff->size);
 
-    size_t page = src_pos / PAGE_SIZE;
-    size_t page_off = src_pos % PAGE_SIZE;
+    size_t page = dst_pos / PAGE_SIZE;
+    size_t page_off = dst_pos % PAGE_SIZE;
+
+    void* dst = pages_kern[page] + page_off;
+
     size_t space_in_page = PAGE_SIZE - page_off;
-    void* src = pages_kern[page] + page_off;
-    *bytes_transferred = 0;
-
-    while (size) {
-        if (space_in_page > size) {
-            space_in_page = size;
-        }
-
-        unsigned long left = copy_from_user(dst, src, space_in_page);
-        *bytes_transferred += (space_in_page - left);
-        if (left) {
-            DEBUG("write_buffer_user: copy_from_user fail");
-            return -EFAULT;
-        }
-
-        src += space_in_page;
-        size -= space_in_page;
-
-        dst = pages_kern[++page];
-        space_in_page = PAGE_SIZE;
+    if (space_in_page > size) {
+        space_in_page = size;
     }
 
-    return 0;
+    unsigned long left = copy_from_user(dst, src, space_in_page);
+    ssize_t copied = space_in_page - left;
+    if (left) {
+        DEBUG("write_dma_buff_user: copy_from_user fail");
+        goto out_copy;
+    }
+
+    src += space_in_page;
+    size -= space_in_page;
+
+    while (size >= PAGE_SIZE) {
+        BUG_ON(page >= (buff->size + PAGE_SIZE - 1) / PAGE_SIZE);
+
+        dst = pages_kern[++page];
+        left = copy_from_user(dst, src, PAGE_SIZE);
+        copied += PAGE_SIZE - left;
+        if (left) {
+            DEBUG("write_dma_buff_user: copy_from_user fail");
+            goto out_copy;
+        }
+
+        src += PAGE_SIZE;
+        size -= PAGE_SIZE;
+    }
+
+    if (size) {
+        BUG_ON(page >= (buff->size + PAGE_SIZE - 1) / PAGE_SIZE);
+        dst = pages_kern[++page];
+        left = copy_from_user(dst, src, size);
+        copied += size - left;
+        if (left) {
+            DEBUG("write_dma_buff_user: copy_from_user fail");
+            goto out_copy;
+        }
+    }
+
+    return copied;
+
+out_copy:
+    if (copied)
+        return copied;
+    return -EFAULT;
 }
 
+ssize_t read_dma_buff_user(const struct dma_buffer* buff, void __user* dst, size_t src_pos, size_t size) {
+    BUG_ON(src_pos + size < src_pos || src_pos + size > buff->size);
+}
 
 int read_buffer_user(struct buffer* buff, void __user* dst, size_t src_pos, size_t size, size_t* bytes_transferred) {
     if (src_pos >= buff->size || size > buff->size || src_pos + size > buff->size) { ERROR("bad read_buffer!"); return -EINVAL; }
