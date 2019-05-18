@@ -78,7 +78,7 @@ static struct harddoom2 devices[DEVICES_LIMIT];
 static int dev_counter = 0;
 // static DEFINE_MUTEX(dev_counter_mut);
 
-int alloc_dev_number() {
+static int alloc_dev_number() {
     int ret = -ENOSPC;
 
     /* TODO lock */
@@ -88,26 +88,26 @@ int alloc_dev_number() {
     return ret;
 }
 
-typedef void (*doom_irq_handler_t)(struct harddoom2*, uint32_t);
+static typedef void (*doom_irq_handler_t)(struct harddoom2*, uint32_t);
 
-void handle_fence(struct harddoom2* hd2, uint32_t bit) {
+static void handle_fence(struct harddoom2* hd2, uint32_t bit) {
     DEBUG("handle fence");
 
     wake_up(&hd2->fence_wq);
 }
 
-void handle_pong_async(struct harddoom2* hd2, uint32_t bit) {
+static void handle_pong_async(struct harddoom2* hd2, uint32_t bit) {
     DEBUG("pong_async");
 
     wake_up(&hd2->write_wq);
 }
 
-void handle_impossible(struct harddoom2* hd2, uint32_t bit) {
+static void handle_impossible(struct harddoom2* hd2, uint32_t bit) {
     ERROR("Impossible interrupt: %u", bit);
     BUG();
 }
 
-irqreturn_t doom_irq_handler(int irq, void* _hd2) {
+static irqreturn_t doom_irq_handler(int irq, void* _hd2) {
     static const uint32_t intr_bits[] = {
         HARDDOOM2_INTR_FENCE, HARDDOOM2_INTR_PONG_SYNC, HARDDOOM2_INTR_PONG_ASYNC,
         HARDDOOM2_INTR_FE_ERROR, HARDDOOM2_INTR_CMD_OVERFLOW, HARDDOOM2_INTR_SURF_DST_OVERFLOW,
@@ -145,7 +145,7 @@ irqreturn_t doom_irq_handler(int irq, void* _hd2) {
     return IRQ_NONE;
 }
 
-void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
+static void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
     static const int DOOMCODE2_LEN = sizeof(doomcode2) / sizeof(uint32_t);
 
     iowrite32(0, bar + HARDDOOM2_FE_CODE_ADDR);
@@ -167,14 +167,14 @@ void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
     iowrite(HARDDOOM2_ENABLE_ALL, bar + HARDDOOM2_ENABLE);
 }
 
-void device_off(void __iomem* bar) {
+static void device_off(void __iomem* bar) {
     iowrite32(0, bar + HARDDOOM2_ENABLE);
     iowrite32(0, bar + HARDDOOM2_INTR_ENABLE);
     ioread32(bar + HARDDOOM2_ENABLE);
 }
 
 /* Make sure to call device_off before freeing the buffers. */
-void free_buffers(struct harddoom2* hd2) {
+static void free_buffers(struct harddoom2* hd2) {
     free_buffer(&hd2->cmd_buff);
 
     release_user_bufs(hd2->curr_bufs);
@@ -366,12 +366,12 @@ static dev_t doom_major;
 
 static int hd2_init(void)
 {
-    int err = 0;
+    int err;
 
 	DEBUG("Init");
     if ((err = alloc_chrdev_region(&doom_major, DEVICES_LIMIT, DRV_NAME))) {
         DEBUG("failed to alloc chrdev region");
-        goto out_alloc_reg;
+        return err;
     }
 
     if ((err = class_register(&doom_class))) {
@@ -389,8 +389,7 @@ static int hd2_init(void)
 out_reg_drv:
     class_unregister(&doom_class);
 out_class:
-    unregister_chrdev_region(&doom_major, DEVICES_LIMIT);
-out_alloc_reg:
+    unregister_chrdev_region(doom_major, DEVICES_LIMIT);
     return err;
 }
 
@@ -459,7 +458,7 @@ static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_id
     return 1;
 }
 
-void release_user_bufs(struct file** bufs) {
+static void release_user_bufs(struct file** bufs) {
     for (int i = 0; i < NUM_USER_BUFS; ++i) {
         if (bufs[i]) {
             fput(bufs[i]);
@@ -574,15 +573,15 @@ static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
     return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - hd2->write_idx - 1;
 }
 
-void enable_intr(struct harddoom2* hd2, uint32_t intr) {
+static void enable_intr(struct harddoom2* hd2, uint32_t intr) {
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
-void disable_intr(struct harddoom2* hd2, uint32_t intr) {
+static void disable_intr(struct harddoom2* hd2, uint32_t intr) {
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
-void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
+static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
     iowrite(intr, hd2->bar + HARDDOOM2_INTR);
 }
 
