@@ -405,12 +405,19 @@ module_init(hd2_init);
 module_exit(hd2_cleanup);
 
 struct cmd {
-    uint32_t data[8];
+    uint32_t data[HARDDOOM2_CMD_SEND_SIZE];
 };
 
-_Static_assert(sizeof(struct cmd) == HARDDOOM2_CMD_SEND_SIZE, "cmd send size");
+static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
+    struct buffer* buff = &hd2->cmd_buff;
+    BUG_ON(write_idx >= CMD_BUF_SIZE);
+    BUG_ON(buff->size != CMD_BUF_SIZE * HARDDOOM2_CMD_SEND_SIZE);
 
-static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
+    size_t dst_pos = write_idx * HARDDOOM2_CMD_SEND_SIZE;
+    return write_buffer(buff, cmd->data, dst_pos, HARDDOOM2_CMD_SEND_SIZE);
+}
+
+static int setup_buffers(struct harddoom2* hd2, struct fd* bufs) {
     int has_change = 0;
     int is_diff = 0;
 
@@ -435,13 +442,10 @@ static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_id
         if (!change) {
             return -ENOMEM;
         }
-        change->cnt = hd2->batch_cnt;
 
+        change->cnt = hd2->batch_cnt;
         list_add_tail(&change->list, &hd2->changes_queue);
     }
-
-    struct cmd dev_cmd = make_setup(bufs, extra_flags);
-    write_cmd(hd2, &dev_cmd, write_idx);
 
     for (i = 0; i < NUM_USER_BUFS; ++i) {
         if (bufs[i].file == hd2->curr_bufs[i]) continue;
@@ -450,10 +454,14 @@ static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_id
             fget(bufs[i].file);
         }
         if (hd2->curr_bufs[i]) {
+            BUG_ON(!change);
             change->bufs[i] = hd2->curr_bufs[i];
         }
         hd2->curr_bufs[i] = bufs[i].file;
     }
+
+    struct cmd dev_cmd = make_setup(hd2->curr_bufs, (hd2->write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC);
+    write_cmd(hd2, &dev_cmd, hd2->write_idx++);
 
     return 1;
 }
@@ -484,36 +492,40 @@ static void collect_buffers(struct harddoom2* hd2) {
 
 static void make_cmd(struct cmd* dev_cmd, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
     switch (user_cmd->type) {
-    case DOOMDEV2_CMD_TYPE_FILL_RECT:
+    case DOOMDEV2_CMD_TYPE_FILL_RECT: {
+        struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
         dev_cmd->data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
             0,
-            HARDDOOM2_CMD_W3(cmd.pos_x, cmd.pos_y),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_y),
             0,
             0,
             0,
-            HARDDOOM2_CMD_W6_A(cmd.width, cmd.height, cmd.fill_color),
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, cmd->fill_color),
             0
         };
         return;
-    case DOOMDEV2_CMD_TYPE_DRAW_LINE:
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
+        struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
         dev_cmd->data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_LINE, extra_flags),
             0,
-            HARDDOOM2_CMD_W3(cmd.pos_a_x, cmd.pos_a_y),
-            HARDDOOM2_CMD_W3(cmd.pos_b_x, cmd.pos_b_y),
+            HARDDOOM2_CMD_W3(cmd->pos_a_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_b_y),
             0,
             0,
-            HARDDOOM2_CMD_W6_A(0, 0, cmd.fill_color),
+            HARDDOOM2_CMD_W6_A(0, 0, cmd->fill_color),
             0
         };
         return;
-    default:
+    }
+    default: {
         /* TODO other cmds */
         dev_cmd->data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
             0,
-            HARDDOOM_CMD_W3(0, 0),
+            HARDDOOM2_CMD_W3(0, 0),
             0,
             0,
             0,
@@ -521,18 +533,10 @@ static void make_cmd(struct cmd* dev_cmd, const struct doomdev2_cmd* user_cmd, u
             0
         };
     }
+    }
 }
 
-static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
-    struct buffer* buff = &hd2->cmd_buff;
-    BUG_ON(write_idx >= CMD_BUF_SIZE);
-    BUG_ON(buff->size != CMD_BUF_SIZE);
-
-    size_t dst_pos = write_idx * 8;
-    return write_buffer(buff, cmd->data, dst_pos, sizeof(cmd->data));
-}
-
-static struct cmd make_setup(struct fd* bufs, uint32_t extra_flags) {
+static struct cmd make_setup(struct file** bufs, uint32_t extra_flags) {
     static const uint32_t bufs_flags[NUM_USER_BUFS] = {
         HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
         HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
@@ -540,33 +544,27 @@ static struct cmd make_setup(struct fd* bufs, uint32_t extra_flags) {
 
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i].file) {
+        if (bufs[i]) {
             extra_flags |= bufs_flags[i];
         }
     }
 
     uint16_t dst_width = 0;
     uint16_t src_width = 0;
-    {
-        struct file* f;
-        if ((f = bufs[0].file)) {
-            struct buffer* buff = (struct buffer*)f->private_data;
-            dst_width = buff->width;
-        }
-        if ((f = bufs[1].file)) {
-            struct buffer* buff = (struct buffer*)f->private_data;
-            src_width = buff->width;
-        }
+    if (bufs[0]) {
+        dst_width = ((struct buffer*)bufs[0]->private_data)->width;
+    }
+    if (bufs[1]) {
+        src_width = ((struct buffer*)bufs[1]->private_data)->width;
     }
 
-    struct cmd hd_cmd;
-    hd_cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);
-    for (int i = 0; i < NUM_USER_BUFFS; ++i) {
-        struct file* f = bufs[i].file;
-        hd_cmd.data[i+1] = f ? (((struct buffer*)f->private_data)->page_table_dev >> 8) : 0;
+    struct cmd cmd;
+    cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);
+    for (i = 0; i < NUM_USER_BUFFS; ++i) {
+        cmd.data[i+1] = bufs[i] ? (((struct buffer*)bufs[i]->private_data)->page_table_dev >> 8) : 0;
     }
 
-    return hd_cmd;
+    return cmd;
 }
 
 static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
@@ -574,10 +572,12 @@ static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
 }
 
 static void enable_intr(struct harddoom2* hd2, uint32_t intr) {
+    /* TODO synchro */
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
 static void disable_intr(struct harddoom2* hd2, uint32_t intr) {
+    /* TODO synchro */
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
@@ -607,22 +607,23 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doo
     wake_all(&hd2->write_wq);
 
     uint32_t space = get_cmd_buf_space(hd2);
-    uint32_t write_idx = hd2->write_idx;
-    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
-    int set = setup_buffers(hd2, bufs, write_idx, extra_flags);
+    int set = setup_buffers(hd2, bufs);
     if (set < 0) {
         DEBUG("write: could not setup");
         goto out_setup;
     } else if (set) {
         --space;
-        write_idx = (write_idx + 1) % CMD_BUF_SIZE;
-        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
     }
 
     if (num_cmds > space) {
         num_cmds = space;
     }
+
+    BUG_ON(!num_cmds);
+
+    uint32_t write_idx = hd2->write_idx;
+    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
     struct cmd dev_cmd;
     size_t it;
