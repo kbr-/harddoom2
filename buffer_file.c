@@ -40,7 +40,7 @@ int make_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t hei
         goto out_getfd;
     }
 
-    struct file* f = anon_inode_getfile(CHRDEV_NAME, buffer_ops, buff, flags);
+    struct file* f = anon_inode_getfile(DRV_NAME, buffer_ops, buff, flags);
     if (IS_ERR(f)) {
         DEBUG("make_buffer: getfile");
         err = PTR_ERR(f);

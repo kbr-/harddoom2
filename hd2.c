@@ -11,17 +11,14 @@
 
 MODULE_LICENSE("GPL");
 
-#define DRV_NANE "harddoom2_driver"
+#define CHRDEV_PREFIX "doom"
 #define DEVICES_LIMIT 256
 #define NUM_USER_BUFS 7
 #define PING_PERIOD (2048 + 32)
-
-struct cmd {
-    uint32_t data[8];
-};
+#define HARDDOOM2_ADDR_SIZE 40
 
 /* 128K */
-#define CMD_BUF_SIZE (MAX_BUFFER_SIZE / (sizeof(struct cmd)))
+#define CMD_BUF_SIZE (MAX_BUFFER_SIZE / HARDDOOM2_CMD_SEND_SIZE)
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },
@@ -29,7 +26,7 @@ static const struct pci_device_id pci_ids[] = {
 };
 
 static struct class doom_class = {
-    .name = CHRDEV_NAME,
+    .name = DRV_NAME,
     .owner = THIS_MODULE,
 };
 
@@ -37,8 +34,8 @@ static struct class doom_class = {
 struct harddoom2 {
     int number;
     void __iomem* bar;
-    struct cdev cdev;
     struct pci_dev* pdev;
+    struct cdev cdev;
 
     struct buffer cmd_buff;
 
@@ -176,6 +173,7 @@ void device_off(void __iomem* bar) {
     ioread32(bar + HARDDOOM2_ENABLE);
 }
 
+/* Make sure to call device_off before freeing the buffers. */
 void free_buffers(struct harddoom2* hd2) {
     free_buffer(&hd2->cmd_buff);
 
@@ -192,11 +190,7 @@ void free_buffers(struct harddoom2* hd2) {
 }
 
 static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
-    int err = 0;
-    void __iomem bar* = NULL;
-    struct device* device = NULL;
-    struct harddoom2* hd2 = NULL;
-    int dev_number = DEVICE_LIMIT;
+    int err;
 
     DEBUG("probe called: %#010x, %#0x10x", id->vendor, id->device);
 
@@ -206,16 +200,16 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     }
 
     if ((err = pci_enable_device(pdev))) {
-        DEBUG("failed to enable device");
-        goto out_enable;
+        DEBUG("can't enable device");
+        return err;
     }
 
     if ((err = pci_request_regions(pdev, DRV_NAME))) {
-        DEBUG("failed to request regions");
+        DEBUG("can't request regions");
         goto out_regions;
     }
 
-    bar = iomap(pdev, 0, 0);
+    void __iomem* bar = pci_iomap(pdev, 0, 0);
     if (!bar) {
         DEBUG("can't map register space");
         err = -ENOMEM;
@@ -224,34 +218,32 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
 
     /* DMA support */
     pci_set_master(pdev);
-    if ((err = pci_set_dma_mask(pdev, DMA_BIT_MASK(40)))) {
-        DEBUG("WAT: no 40bit DMA, err: %d", err);
+
+    if ((err = pci_set_dma_mask(pdev, DMA_BIT_MASK(HARDDOOM2_ADDR_SIZE)))) {
+        DEBUG("can't set dma mask, err: ", err);
         err = -EIO;
         goto out_dma;
     }
-    if ((err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(40)))) {
-        DEBUG("WAT: no 40bit DMA, err: %d (set_consistent_dma_mask)", err);
+    if ((err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(HARDDOOM2_ADDR_SIZE)))) {
+        DEBUG("can't set consistent dma mask, err: ", err);
         err = -EIO;
         goto out_dma;
     }
 
     /* TODO: free dev numbers, use list? */
-    dev_number = alloc_dev_number();
-    if (dev_number < 0) {
-        DEBUG("failed to allocate device number");
-        err = dev_number;
+    if ((err = alloc_dev_number()) < 0) {
+        DEBUG("can't allocate device number");
         goto out_dma;
     }
-    if (dev_number >= DEVICE_LIMIT) { ERROR("OOPS"); err = -ENOSPC; goto out_dma; }
 
-    hd2 = &devices[dev_number];
-    pci_set_drvdata(pdev, hd2);
+    int dev_number = err;
+    BUG_ON(dev_number >= DEVICE_LIMIT);
 
-    memset(hd2, 0, sizeof(harddoom2));
+    struct harddoom2* hd2 = &devices[dev_number];
+
+    memset(hd2, 0, sizeof(struct harddoom2));
     hd2->number = dev_number;
     hd2->bar = bar;
-    cdev_init(&hd2->cdev, &context_ops);
-    hd2->cdev.owner = THIS_MODULE;
     hd2->pdev = pdev;
 
     if ((err = init_buffer(&hd2->cmd_buff, &pdev->dev, MAX_BUFFER_SIZE))) {
@@ -263,86 +255,85 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     init_waitqueue_head(&hd2->fence_wq);
     INIT_LIST_HEAD(&hd2->changes_queue);
 
+    pci_set_drvdata(pdev, hd2);
+
+    if ((err = request_irq(pdev->irq, doom_irq_handler, IRQF_SHARED, DRV_NAME, hd2))) {
+        DEBUG("can't setup interrupt handler");
+        goto err_irq;
+    }
+
     reset_device(bar, hd2->cmd_buff->page_table_dev);
+
+    cdev_init(&hd2->cdev, &context_ops);
+    hd2->cdev.owner = THIS_MODULE;
 
     if ((err = cdev_add(&hd2->cdev, doom_major + dev_number, 1))) {
         DEBUG("can't register cdev");
         goto out_cdev_add;
     }
 
-    device = device_create(&doom_class, &pdev->dev, doom_major + dev_number, 0, CHRDEV_NAME "%d", dev_number);
-    if (IS_ERR(device)) {
+    struct device* dev = device_create(&doom_class, &pdev->dev,
+            doom_major + dev_number, 0, CHRDEV_PREFIX "%d", dev_number);
+    if (IS_ERR(dev)) {
         DEBUG("can't create device");
-        err = PTR_ERR(device);
+        err = PTR_ERR(dev);
         goto err_device;
-    }
-
-    if ((err = request_irq(pdev->irq, doom_irq_handler, IRQF_SHARED, CHRDEV_NAME, hd2))) {
-        DEBUG("can't setup interrupt handler");
-        goto err_irq;
     }
 
     return 0;
 
-err_irq:
-    device_destroy(&doom_class, doom_major + dev_number);
 err_device:
     cdev_del(&hd2->cdev);
 out_cdev_add:
     device_off(bar);
+    free_irq(pdev->irq, hd2);
+err_irq:
+    pci_set_drvdata(pdev, NULL);
     free_buffers(hd2);
 out_cmd_buff:
-    pci_set_drvdata(pdev, NULL);
-    /* TODO */
+    /* TODO free dev numbers */
 out_dma:
     pci_clear_master(pdev);
-    pci_iounmap(pdev, hd2->bar);
+
+    pci_iounmap(pdev, bar);
 out_iomap:
     pci_release_regions(pdev);
 out_regions:
     pci_disable_device(pdev);
-out_enable:
     return err;
 }
 
-static void pci_remove(struct pci_dev* dev) {
-    struct harddoom2* hd2 = pci_get_drvdata(dev);
+static void pci_remove(struct pci_dev* pdev) {
+    struct harddoom2* hd2 = pci_get_drvdata(pdev);
     void __iomem* bar = NULL;
 
     if (!hd2) {
         ERROR("pci_remove: no pcidata!");
     } else {
-        free_irq(dev->irq, hd2);
-        if (hd2->number >= 0 && hd2->number < DEVICES_LIMIT) {
-            device_destroy(&doom_class, doom_major + hd2->number);
-        } else {
-            ERROR("pci_remove: OOPS");
-            if (&devices[hd2->number] != hd2) {
-                ERROR("pci_remove: double OOPS");
-            }
-        }
-        hd2->number = -1;
-        cdev_del(&hd2->cdev);
+        BUG_ON(hd2->number < 0 || hd2->number >= DEVICES_LIMIT);
+        BUG_ON(&devices[hd2->number] != hd2);
+
         bar = hd2->bar;
 
-        /* TODO: what if device gone */
+        device_destroy(&doom_class, doom_major + hd2->number);
+        cdev_del(&hd2->cdev);
         device_off(bar);
+        free_irq(pdev->irq, hd2);
+        pci_set_drvdata(pdev, NULL);
         free_buffers(hd2);
-
-        /* TODO: free dev number */
     }
 
-    pci_set_drvdata(dev, NULL);
-    pci_clear_master(dev);
+    /* TODO: free dev number */
+    pci_clear_master(pdev);
 
     if (!bar) {
         ERROR("pci_remove: no bar!");
     } else {
-        pci_iounmap(dev, hd2->bar);
+        pci_iounmap(pdev, bar);
     }
 
-    pci_release_regions(dev);
-    pci_disable_device(dev);
+    pci_release_regions(pdev);
+    pci_disable_device(pdev);
 }
 
 static int pci_suspend(struct pci_dev* dev, pm_message_t state) {
@@ -378,7 +369,7 @@ static int hd2_init(void)
     int err = 0;
 
 	DEBUG("Init");
-    if ((err = alloc_chrdev_region(&doom_major, DEVICES_LIMIT, CHRDEV_NAME))) {
+    if ((err = alloc_chrdev_region(&doom_major, DEVICES_LIMIT, DRV_NAME))) {
         DEBUG("failed to alloc chrdev region");
         goto out_alloc_reg;
     }
@@ -413,6 +404,12 @@ static void hd2_cleanup(void)
 
 module_init(hd2_init);
 module_exit(hd2_cleanup);
+
+struct cmd {
+    uint32_t data[8];
+};
+
+_Static_assert(sizeof(struct cmd) == HARDDOOM2_CMD_SEND_SIZE, "cmd send size");
 
 static int setup_buffers(struct harddoom2* hd2, struct fd* bufs, size_t write_idx, uint32_t extra_flags) {
     int has_change = 0;
