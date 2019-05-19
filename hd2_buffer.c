@@ -79,6 +79,125 @@ void release_user_bufs(struct hd2_buffer* bufs[NUM_USER_BUFS]) {
     }
 }
 
+static int hd2_buff_release(struct inode* inode, struct file* file) {
+    struct hd2_buffer* buff = file-private_data;
+    BUG_ON(buff->f != file);
+
+    free_dma_buff(buff);
+    kfree(buff);
+
+    return 0;
+}
+
+static ssize_t hd2_buff_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
+    struct hd2_buffer* buff = file->private_data;
+    BUG_ON(buff->f != file);
+
+    if (*off < 0) {
+        return -EINVAL;
+    }
+
+    if (*off >= buff->size) {
+        return -ENOSPC;
+    }
+
+    if (count > buff->size - *off) {
+        count = buff_size - *off;
+    }
+
+    if (!count) {
+        return -EINVAL;
+    }
+
+    /* TODO mutex lock */
+    struct counter last_use = buff->last_use;
+    /* unlock */
+
+    wait_for_fence_cnt(&buff->hd2, last_use);
+    /* Someone might have moved buff->last_use forward by now, but we don't care.
+       It's the user's responsibility not to send any more commands using this buffer
+       in the middle of a buffer_write or buffer_read call. */
+
+    ssize_t ret = write_dma_buff_user(buff, _buff, *off, count);
+    if (ret < 0) {
+        DEBUG("hd2 buff write: error");
+        return ret;
+    }
+    *off += ret;
+
+    BUG_ON(!ret);
+    return ret;
+}
+
+static ssize_t hd2_buff_read(struct file* file, char __user *_buff, size_t count, loff_t* off) {
+    struct hd2_buffer* buff = file->private_data;
+    BUG_ON(buff->f != file);
+
+    if (*off < 0) {
+        return -EINVAL;
+    }
+
+    if (*off >= buff->size) {
+        return 0;
+    }
+
+    if (count > buff->size - *off) {
+        count = buff_size - *off;
+    }
+
+    if (!count) {
+        return -EINVAL;
+    }
+
+    /* TODO mutex lock */
+    struct counter last_write = buff->last_write;
+    /* unlock */
+
+    wait_for_fence_cnt(&buff->hd2, last_write);
+    /* See comment in buffer_write. */
+
+    ssize_t ret = read_buffer_user(buff, _buff, *off, count);
+    if (ret < 0) {
+        DEBUG("hd2_buff_read: read error");
+        return ret;
+    }
+    *off += ret;
+
+    BUG_ON(!ret);
+    return ret;
+}
+
+static loff_t hd2_buff_llseek(struct file* file, loff_t off, int whence) {
+    struct hd2_buffer* buff = file->private_data;
+    BUG_ON(buff->f != file);
+    BUG_ON(file->f_pos < 0 || file->f_pos > buff->size);
+
+    if (whence == SEEK_CUR) {
+        off += file->f_pos;
+    } else if (whence == SEEK_END) {
+        off += buff->size;
+    } else if (whence != SEEK_SET) {
+        DEBUG("llseek: wrong whence");
+        return -EINVAL;
+    }
+
+    if (off < 0 || off > buff->size) {
+        DEBUG("llseek: SEEK_SET: out of bounds");
+        return -EINVAL;
+    }
+
+    file->f_pos = off;
+    return off;
+}
+
+struct file_operations hd2_buff_ops = {
+    .owner = THIS_MODULE,
+    .release = hd2_buff_release,
+    .write = hd2_buff_write,
+    .read = hd2_buff_read,
+    .llseek = hd2_buff_llseek
+}
+
 int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t height) {
     BUG_ON((width && size != width * height) || size > MAX_BUFFER_PAGES * HARDDOOM2_PAGE_SIZE);
     int err;
