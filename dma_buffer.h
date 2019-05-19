@@ -20,7 +20,7 @@ struct dma_buffer {
 int init_dma_buff(struct dma_buffer* buff, size_t size, struct device* dev);
 void free_dma_buff(struct dma_buffer* buff);
 
-void write_dma_buff(struct dma_buffer* buff, void* src, size_t dst_pos, size_t size);
+void write_dma_buff(struct dma_buffer* buff, const void* src, size_t dst_pos, size_t size);
 
 ssize_t write_dma_buff_user(struct dma_buffer* buff, const void __user* src, size_t dst_pos, size_t size);
 ssize_t read_dma_buff_user(const struct dma_buffer* buff, void __user* dst, size_t src_pos, size_t size);

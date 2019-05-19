@@ -8,6 +8,7 @@
 
 struct harddoom2;
 struct hd2_buffer;
+struct dma_buffer;
 
 struct harddoom2* get_hd2(unsigned num);
 

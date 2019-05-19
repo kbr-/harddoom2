@@ -17,7 +17,7 @@ static int context_release(struct inode* inode, struct file* file);
 static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg);
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off);
 
-const struct file_operations context_ops = {
+const struct file_operations _context_ops = {
     .owner = THIS_MODULE,
     .open = context_open,
     .release = context_release,
@@ -25,6 +25,8 @@ const struct file_operations context_ops = {
     .compat_ioctl = context_ioctl,
     .write = context_write
 };
+
+const struct file_operations* const context_ops = &_context_ops;
 
 struct context {
     struct harddoom2* hd2;
@@ -34,7 +36,7 @@ struct context {
 static struct context* get_ctx(struct file* file) {
     BUG_ON(!file);
     BUG_ON(!file->private_data);
-    BUG_ON(file->f_op != &context_ops);
+    BUG_ON(file->f_op != context_ops);
 
     struct context* ctx = (struct context*)file->private_data;
 

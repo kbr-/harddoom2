@@ -277,7 +277,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
 
     reset_device(bar, hd2->cmd_buff.page_table_dev);
 
-    cdev_init(&hd2->cdev, &context_ops);
+    cdev_init(&hd2->cdev, context_ops);
     hd2->cdev.owner = THIS_MODULE;
 
     if ((err = cdev_add(&hd2->cdev, doom_major + dev_number, 1))) {

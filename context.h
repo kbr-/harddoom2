@@ -1,6 +1,6 @@
 #ifndef CONTEXT_H
 #define CONTEXT_H
 
-const struct file_operations context_ops;
+extern const struct file_operations* const context_ops;
 
 #endif
