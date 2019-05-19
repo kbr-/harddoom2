@@ -18,7 +18,7 @@ struct file_operations context_ops = {
 
 struct context {
     struct harddoom2* hd2;
-    struct fd curr_bufs[NUM_USER_BUFS];
+    struct hd2_buffer* curr_bufs[NUM_USER_BUFS];
 };
 
 static struct context* get_ctx(struct file* file) {
@@ -29,7 +29,6 @@ static struct context* get_ctx(struct file* file) {
     struct context* ctx = (struct context*)file->private_data;
 
     if (!ctx->hd2) { ERROR("get_ctx no hd2!"); return ERR_PTR(-EINVAL); }
-    if (!ctx->hd2->cmd_buff) { ERROR("get_ctx no cmd_buff!"); return ERR_PTR(-EINVAL); }
 
     return ctx;
 }
@@ -56,10 +55,7 @@ static int context_release(struct inode* inode, struct file* file) {
     struct context* ctx = get_ctx(file);
     if (IS_ERR(ctx)) { ERROR("context_ioctl"); return PTR_ERR(ctx); }
 
-    int i;
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        fdput(ctx->curr_bufs[i]);
-    }
+    release_user_bufs(ctx->curr_bufs);
 
     kfree(ctx);
     return 0;
@@ -77,63 +73,51 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
 
     int32_t fds[NUM_USER_BUFS] = { params.surf_dst_fd, params.surf_src_fd, params.texture_fd,
         params.flat_fd, params.colormap_fd, params.translation_fd, params.tranmap_fd };
-    struct fd fs[NUM_USER_BUFS];
+    struct hd2_buffer* bufs[NUM_USER_BUFS] = { NULL };
 
     int err;
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (fds[i] == -1) {
-            fs[i] = (struct fd){NULL, 0};
-            continue;
-        }
+        if (fds[i] == -1) continue;
 
-        fs[i] = fdget(fds[i]);
-        if (!fs[i].file) {
-            DEBUG("setup: fd no file");
+        bufs[i] = hd2_buff_get(fds[i]);
+        if (!bufs[i]) {
+            DEBUG("setup: wrong fd");
             err = -EINVAL;
-            goto out_files;
-        }
-        if (fs[i].file->f_op != buffer_ops) {
-            DEBUG("setup: fd wrong file");
-            err = -EINVAL;
-            goto out_f_op;
+            goto out_fds;
         }
     }
 
     int j;
     for (j = 0; j < 2; ++j) {
-        if (fds[j] == -1) continue;
+        if (!bufs[j]) continue;
 
-        struct buffer* buff = (struct buffer*)fs[j].file->private_data;
-        if (!buff->width) {
+        if (!is_surface(bufs[j])) {
             DEBUG("setup: non-surface given as surface");
             err = -EINVAL;
-            goto out_f_op;
+            goto out_fds;
         }
     }
     for (; j < NUM_USER_BUFS; ++j) {
-        if (fds[j] == -1) continue;
+        if (!bufs[j]) continue;
 
-        struct buffer* buff = (struct buffer*)fs[j].file->private_data;
-        if (buff->width) {
+        if (is_surface(bufs[j])) {
             DEBUG("setup: surface given as non-surface");
             err = -EINVAL;
-            goto out_f_op;
+            goto out_fds;
         }
     }
 
     for (j = 0; j < NUM_USER_BUFS; ++j) {
-        fdput(ctx->curr_bufs[j]);
-        ctx->curr_bufs[j] = fs[j];
+        hd2_buff_put(ctx->curr_bufs[j]);
+        ctx->curr_bufs[j] = bufs[j];
     }
 
     return 0;
 
-out_f_op:
-    fdput(fs[i]);
-out_files:
+out_fds:
     for (--i; i >= 0; --i) {
-        fdput(fs[i]);
+        hd2_buff_put(bufs[i]);
     }
 
     return err;
@@ -156,8 +140,8 @@ static int context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
 }
 
 static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd) {
-    struct buffer* buff = (struct buffer*)ctx->curr_bufs[0].file->private_data;
-    uint16_t dst_width = buff->width, dst_height = buff->height;
+    struct hd2_buffer* dst_buff = ctx->curr_bufs[0];
+    uint16_t dst_width = get_buff_width(dst_buff), dst_height = get_buff_height(dst_buff);
 
     switch (user_cmd->type) {
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
@@ -201,7 +185,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         count = MAX_KMALLOC;
     }
 
-    if (!ctx->curr_bufs[0].file) {
+    if (!ctx->curr_bufs[0]) {
         DEBUG("write: no dst surface set");
         return -EINVAL;
     }
