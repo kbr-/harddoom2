@@ -1,3 +1,5 @@
+#include "hd2.h"
+#include "hd2_buffer.h"
 #include "context.h"
 
 #define MAX_KMALLOC (128 * 1024)
@@ -22,26 +24,25 @@ struct context {
 };
 
 static struct context* get_ctx(struct file* file) {
-    if (!file) { ERROR("get_ctx: file NULL"); return ERR_PTR(-EINVAL); }
-    if (!file->private_data) { ERROR("get_ctx: file private data NULL"); return ERR_PTR(-EINVAL); }
-    if (file->f_ops != doom_ops) { ERROR("get_ctx: wrong fops"); return ERR_PTR(-EINVAL); }
+    BUG_ON(!file);
+    BUG_ON(!file->private_data);
+    BUG_ON(file->f_ops != context_ops);
 
     struct context* ctx = (struct context*)file->private_data;
 
-    if (!ctx->hd2) { ERROR("get_ctx no hd2!"); return ERR_PTR(-EINVAL); }
+    BUG_ON(!ctx->hd2);
 
     return ctx;
 }
 
 static int context_open(struct inode* inode, struct file* file) {
     int number = MINOR(inode->i_rdev);
-    if (number < 0 || number >= DEVICES_LIMIT) {
-        ERROR("context_open: minor not in range");
-        return -EINVAL;
+    if (number < 0 || number >= 256) { ERROR("context_open: minor not in range"); return -EINVAL;
     }
 
     struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {
+        DEBUG("ctx: kmalloc");
         return -ENOMEM;
     }
 
@@ -53,7 +54,6 @@ static int context_open(struct inode* inode, struct file* file) {
 
 static int context_release(struct inode* inode, struct file* file) {
     struct context* ctx = get_ctx(file);
-    if (IS_ERR(ctx)) { ERROR("context_ioctl"); return PTR_ERR(ctx); }
 
     release_user_bufs(ctx->curr_bufs);
 
@@ -125,7 +125,6 @@ out_fds:
 
 static int context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
     struct context* ctx = get_ctx(file);
-    if (IS_ERR(ctx)) { ERROR("context_ioctl"); return PTR_ERR(ctx); }
 
     switch (cmd) {
     case DOOMDEV2_IOCTL_CREATE_SURFACE:
@@ -174,7 +173,6 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     ssize_t err;
 
     struct context* ctx = get_ctx(file);
-    if (IS_ERR(ctx)) { ERROR("context_write ctx"); return PTR_ERR(ctx); }
 
     if (!count || count % sizeof(doomdev2_cmd) != 0) {
         DEBUG("context_write: wrong count %llu", count);
@@ -221,7 +219,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     num_cmds = it;
     err = harddoom2_write(ctx->hd2, ctx->curr_bufs, cmds, num_cmds);
     BUG_ON(!err || err > num_cmds);
-    if (err >= 0) {
+    if (err > 0) {
         err *= sizeof(struct doomdev2_cmd);
     }
 

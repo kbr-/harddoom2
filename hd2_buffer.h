@@ -1,6 +1,8 @@
 #ifndef HD2_BUFFER_H
 #define HD2_BUFFER_H
 
+#include "counter.h"
+
 #define NUM_USER_BUFS 7
 
 /* Open a new file representing a buffer and return its file descriptor. */

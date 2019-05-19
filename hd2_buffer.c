@@ -1,4 +1,6 @@
 #include "dma_buffer.h"
+#include "hd2.h"
+
 #include "hd2_buffer.h"
 
 struct hd2_buffer {

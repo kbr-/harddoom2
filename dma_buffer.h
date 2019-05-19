@@ -4,6 +4,8 @@
 #include "harddoom2.h"
 
 #define MAX_BUFFER_PAGES 1024
+
+/* 4K */
 #define PAGE_SIZE HARDDOOM2_PAGE_SIZE
 
 struct dma_buffer {

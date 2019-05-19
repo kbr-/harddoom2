@@ -1,8 +1,10 @@
 #ifndef HD2_H
 #define HD2_H
 
+#include "doomdev2.h"
+
 #include "counter.h"
-#include "buffer.h"
+#include "hd2_buffer.h"
 
 struct harddoom2;
 
@@ -13,6 +15,9 @@ int harddoom2_create_buffer(struct context* ctx, struct doomdev2_ioctl_create_bu
 /* Send as many commands in array 'cmds' with size 'num_cmds' as possible to the device using buffers 'bufs'.
    It is assumed that the given commands are valid with respect to the given buffers.
    Returns the number of commands written or negative error code. */
-ssize_t harddoom2_write(struct harddoom2* hd2, struct fd* bufs, const struct doomdev2_cmd* cmds, size_t num_cmds);
+ssize_t harddoom2_write(struct harddoom2* hd2, struct hd_buffer* bufs[NUM_USER_BUFS],
+        const struct doomdev2_cmd* cmds, size_t num_cmds);
+
+void wait_for_fence_cnt(struct harddoom2* hd2, struct counter cnt);
 
 #endif
