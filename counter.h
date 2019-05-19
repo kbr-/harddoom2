@@ -1,9 +1,11 @@
 #ifndef COUNTER_H
 #define COUNTER_H
 
+#include <linux/types.h>
+
 struct counter {
     uint64_t val;
-}
+};
 
 void cnt_incr(struct counter* cnt);
 uint32_t cnt_lower(struct counter cnt);

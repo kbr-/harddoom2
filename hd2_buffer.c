@@ -211,7 +211,7 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     }
 
     if ((err = init_dma_buff(buff, &hd2->pdev->dev, size))) {
-        DEBUG("make_buffer: init_buffer");
+        DEBUG("new_hd2_buffer: init_buffer");
         goto out_buff;
     }
 
@@ -223,14 +223,14 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
 
     int fd = get_unused_fd_flags(flags);
     if (fd < 0) {
-        DEBUG("make_buffer: get unused fd, %d", fd);
+        DEBUG("new_hd2_buffer: get unused fd, %d", fd);
         err = fd;
         goto out_getfd;
     }
 
     struct file* f = anon_inode_getfile(DRV_NAME, hd2_buff_ops, buff, flags);
     if (IS_ERR(f)) {
-        DEBUG("make_buffer: getfile");
+        DEBUG("new_hd2_buffer: getfile");
         err = PTR_ERR(f);
         goto out_getfile;
     }

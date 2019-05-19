@@ -5,6 +5,9 @@
 
 #define NUM_USER_BUFS 7
 
+struct harddoom2;
+struct hd2_buffer;
+
 /* Open a new file representing a buffer and return its file descriptor. */
 int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t height);
 
