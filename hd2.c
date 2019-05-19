@@ -120,7 +120,7 @@ static irqreturn_t doom_irq_handler(int irq, void* _hd2) {
         HARDDOOM2_PAGE_FAULT_SURF_SRC, HARDDOOM2_PAGE_FAULT_TEXTURE, HARDDOOM2_PAGE_FAULT_FLAT,
         HARDDOOM2_PAGE_FAULT_TRANSLATION, HARDDOOM2_PAGE_FAULT_COLORMAP, HARDDOOM2_PAGE_FAULT_TRANMAP };
 
-    static const uint32_t NUM_INTR_BITS = sizeof(intr_bits) / size_of(uint32_t);
+    static const uint32_t NUM_INTR_BITS = ARRAY_SIZE(intr_bits);
     _Static_assert(NUM_INTR_BITS == 15, "num intr bits");
 
     static const doom_irq_handler_t intr_handlers[NUM_INTR_BITS] = {
@@ -151,10 +151,8 @@ static irqreturn_t doom_irq_handler(int irq, void* _hd2) {
 }
 
 static void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
-    static const int DOOMCODE2_LEN = sizeof(doomcode2) / sizeof(uint32_t);
-
     iowrite32(0, bar + HARDDOOM2_FE_CODE_ADDR);
-    for (int i = 0; i < DOOMCODE2_LEN; ++i) {
+    for (int i = 0; i < ARRAY_SIZE(doomcode2); ++i) {
         iowrite32(doomcode2[i], bar + HARDDOOM2_FE_CODE_WINDOW);
     }
     iowrite32(HARDDOOM2_RESET_ALL, bar + HARDDOOM2_RESET);
