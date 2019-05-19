@@ -1,15 +1,23 @@
+#include <linux/fs.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+
+#include "doomdev2.h"
+
 #include "hd2.h"
 #include "hd2_buffer.h"
+#include "common.h"
+
 #include "context.h"
 
 #define MAX_KMALLOC (128 * 1024)
 
 static int context_open(struct inode* inode, struct file* file);
 static int context_release(struct inode* inode, struct file* file);
-static int context_ioctl(struct file* file, unsigned cmd, unsigned long arg);
+static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg);
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off);
 
-struct file_operations context_ops = {
+const struct file_operations context_ops = {
     .owner = THIS_MODULE,
     .open = context_open,
     .release = context_release,
@@ -26,7 +34,7 @@ struct context {
 static struct context* get_ctx(struct file* file) {
     BUG_ON(!file);
     BUG_ON(!file->private_data);
-    BUG_ON(file->f_ops != context_ops);
+    BUG_ON(file->f_op != &context_ops);
 
     struct context* ctx = (struct context*)file->private_data;
 
@@ -37,8 +45,7 @@ static struct context* get_ctx(struct file* file) {
 
 static int context_open(struct inode* inode, struct file* file) {
     int number = MINOR(inode->i_rdev);
-    if (number < 0 || number >= 256) { ERROR("context_open: minor not in range"); return -EINVAL;
-    }
+    if (number < 0 || number >= 256) { ERROR("context_open: minor not in range"); return -EINVAL; }
 
     struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {
@@ -46,7 +53,7 @@ static int context_open(struct inode* inode, struct file* file) {
         return -ENOMEM;
     }
 
-    ctx->hd2 = &devices[number];
+    ctx->hd2 = get_hd2(number);
     file->private_data = ctx;
 
     return 0;
@@ -62,7 +69,7 @@ static int context_release(struct inode* inode, struct file* file) {
 }
 
 static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
-    struct doomdev_2_ioctl_setup params;
+    struct doomdev2_ioctl_setup params;
 
     DEBUG("setup");
 
@@ -80,7 +87,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     for (i = 0; i < NUM_USER_BUFS; ++i) {
         if (fds[i] == -1) continue;
 
-        bufs[i] = hd2_buff_get(fds[i]);
+        bufs[i] = hd2_buff_fd_get(fds[i]);
         if (!bufs[i]) {
             DEBUG("setup: wrong fd");
             err = -EINVAL;
@@ -123,7 +130,7 @@ out_fds:
     return err;
 }
 
-static int context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
+static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
     struct context* ctx = get_ctx(file);
 
     switch (cmd) {
@@ -144,15 +151,15 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
 
     switch (user_cmd->type) {
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
-        struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
-        if ((uint32_t)cmd->pos_x + cmd->width > dst_width || (uint32_t)cmd->pos_y + cmd.height > dst_height) {
+        const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
+        if ((uint32_t)cmd->pos_x + cmd->width > dst_width || (uint32_t)cmd->pos_y + cmd->height > dst_height) {
             DEBUG("fill_rect: out of bounds");
             return -EINVAL;
         }
         return 0;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
-        struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
+        const struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
         if (cmd->pos_a_x >= dst_width || cmd->pos_a_y >= dst_height
                 || cmd->pos_b_x >= dst_width || cmd->pos_b_y >= dst_height) {
             DEBUG("draw_line: out of bounds");
@@ -160,22 +167,22 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         }
         return 0;
     }
-    default:
-        /* TODO: other cmds */
     }
+
+    /* TODO: other cmds */
 
     return 0;
 }
 
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
     _Static_assert(MAX_KMALLOC % sizeof(struct doomdev2_cmd) == 0, "cmd size mismatch");
-    _Static_assert(MAX_KMALLOC >= SSIZE_MAX);
+    _Static_assert(MAX_KMALLOC <= LONG_MAX && sizeof(ssize_t) == sizeof(long), "ssize max");
     ssize_t err;
 
     struct context* ctx = get_ctx(file);
 
-    if (!count || count % sizeof(doomdev2_cmd) != 0) {
-        DEBUG("context_write: wrong count %llu", count);
+    if (!count || count % sizeof(struct doomdev2_cmd) != 0) {
+        DEBUG("context_write: wrong count %lu", count);
         return -EINVAL;
     }
 
@@ -205,7 +212,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
     size_t it;
     for (it = 0; it < num_cmds; ++it) {
-        if ((err = validate_cmd(cmds[it]))) {
+        if ((err = validate_cmd(ctx, &cmds[it]))) {
             break;
         }
     }

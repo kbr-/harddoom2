@@ -9,6 +9,8 @@
 struct harddoom2;
 struct hd2_buffer;
 
+struct harddoom2* get_hd2(unsigned num);
+
 int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create_surface __user* _params);
 
 int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_buffer __user* _params);

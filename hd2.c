@@ -84,6 +84,11 @@ struct buffer_change {
 
 static struct harddoom2 devices[DEVICES_LIMIT];
 
+struct harddoom2* get_hd2(unsigned num) {
+    BUG_ON(num >= DEVICES_LIMIT);
+    return &devices[num];
+}
+
 static int dev_counter = 0;
 // static DEFINE_MUTEX(dev_counter_mut);
 
@@ -446,6 +451,8 @@ static struct cmd make_cmd(const struct doomdev2_cmd* user_cmd, uint32_t extra_f
         }};
     }
     }
+
+    /* TODO other cmds */
 
     return (struct cmd){ .data = {
         HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),

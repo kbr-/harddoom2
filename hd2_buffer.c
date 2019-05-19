@@ -21,6 +21,10 @@ struct hd2_buffer {
     uint16_t height;
 };
 
+bool is_surface(struct hd2_buffer* buff) {
+    return buff->width != 0;
+}
+
 uint16_t get_buff_width(struct hd2_buffer* buff) {
     /* We only perform this on surface buffers. */
     BUG_ON(!buff->width || !buff->height);
