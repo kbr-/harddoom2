@@ -73,8 +73,6 @@ static int context_release(struct inode* inode, struct file* file) {
 static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _params) {
     struct doomdev2_ioctl_setup params;
 
-    DEBUG("setup");
-
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_setup))) {
         DEBUG("setup copy_from_user fail");
         return -EFAULT;
