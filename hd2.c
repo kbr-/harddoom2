@@ -554,9 +554,12 @@ static int setup_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER
 static void _update_last_fence_cnt(struct harddoom2* hd2) {
     uint32_t curr_lower = ioread32(hd2->bar + HARDDOOM2_FENCE_COUNTER);
     uint32_t last_lower = cnt_lower(hd2->last_fence_cnt);
+
+    uint32_t upper = cnt_upper(hd2->last_fence_cnt);
     if (last_lower > curr_lower) {
-        hd2->last_fence_cnt = make_cnt(cnt_upper(hd2->last_fence_cnt) + 1, curr_lower);
+        ++upper;
     }
+    hd2->last_fence_cnt = make_cnt(upper, curr_lower);
 }
 
 void bump_fence_wait(struct harddoom2* hd2, struct counter cnt) {

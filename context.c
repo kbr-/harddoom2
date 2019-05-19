@@ -90,9 +90,9 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         if (fds[i] == -1) continue;
 
         bufs[i] = hd2_buff_fd_get(fds[i]);
-        if (!bufs[i]) {
+        if (IS_ERR(bufs[i])) {
             DEBUG("setup: wrong fd");
-            err = -EINVAL;
+            err = PTR_ERR(bufs[i]);
             goto out_fds;
         }
     }

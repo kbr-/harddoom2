@@ -168,7 +168,7 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     buff->width = width;
     buff->height = height;
 
-    int flags = O_RDWR | O_CREAT;
+    int flags = O_RDWR | O_CLOEXEC;
 
     int fd = get_unused_fd_flags(flags);
     if (fd < 0) {
@@ -177,14 +177,14 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
         goto out_getfd;
     }
 
-    struct file* f = anon_inode_getfile(DRV_NAME, &hd2_buff_ops, buff, flags);
+    struct file* f = anon_inode_getfile("[harddoom2]", &hd2_buff_ops, buff, flags);
     if (IS_ERR(f)) {
         DEBUG("new_hd2_buffer: getfile");
         err = PTR_ERR(f);
         goto out_getfile;
     }
 
-    f->f_mode = FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+    f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
     buff->f = f;
 
     fd_install(fd, f);
@@ -235,13 +235,13 @@ struct hd2_buffer* hd2_buff_fd_get(int fd) {
     struct file* f = fget(fd);
     if (!f) {
         DEBUG("hd2_buff_fd_get: no file");
-        return NULL;
+        return ERR_PTR(-EBADF);
     }
 
     if (f->f_op != &hd2_buff_ops) {
         DEBUG("hd2_buff_fd_get: wrong ops");
         fput(f);
-        return NULL;
+        return ERR_PTR(-EINVAL);
     }
 
     struct hd2_buffer* buff = f->private_data;
