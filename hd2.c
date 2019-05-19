@@ -718,6 +718,8 @@ out_setup:
 }
 
 int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create_surface __user* _params) {
+    DEBUG("harddoom2 create surface");
+
     struct doomdev2_ioctl_create_surface params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
         DEBUG("create surface copy_from_user fail");
@@ -740,6 +742,8 @@ int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create
 }
 
 int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_buffer __user* _params) {
+    DEBUG("harddoom2 create buffer");
+
     struct doomdev2_ioctl_create_buffer params;
     if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_buffer))) {
         DEBUG("create_buffer copy_from_user fail");
@@ -752,4 +756,8 @@ int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_
     }
 
     return new_hd2_buffer(hd2, params.size, 0, 0);
+}
+
+int harddoom2_init_dma_buff(struct harddoom2* hd2, struct dma_buffer* buff, size_t size) {
+    return init_dma_buff(buff, size, &hd2->pdev->dev);
 }
