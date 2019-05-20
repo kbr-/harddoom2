@@ -108,11 +108,27 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     for (; j < NUM_USER_BUFS; ++j) {
         if (!bufs[j]) continue;
 
+        BUG_ON(!get_buff_size(bufs[j]));
         if (is_surface(bufs[j])) {
             DEBUG("setup: surface given as non-surface");
             err = -EINVAL;
             goto out_fds;
         }
+    }
+    if (bufs[TRANSLATE_BUF_IDX] && get_buff_size(bufs[TRANSLATE_BUF_IDX]) % (1 << 8)) {
+        DEBUG("setup: translate buf wrong size");
+        err = -EINVAL;
+        goto out_fds;
+    }
+    if (bufs[COLORMAP_BUF_IDX] && get_buff_size(bufs[COLORMAP_BUF_IDX]) % (1 << 8)) {
+        DEBUG("setup: colormap buf wrong size");
+        err = -EINVAL;
+        goto out_fds;
+    }
+    if (bufs[TRANMAP_BUF_IDX] && get_buff_size(bufs[TRANMAP_BUF_IDX]) % (1 << 16)) {
+        DEBUG("setup: tranmap buf wrong size");
+        err = -EINVAL;
+        goto out_fds;
     }
 
     for (j = 0; j < NUM_USER_BUFS; ++j) {
@@ -146,7 +162,8 @@ static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
 }
 
 static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd) {
-    struct hd2_buffer* dst_buff = ctx->curr_bufs[0];
+    BUG_ON(!ctx->curr_bufs[DST_BUF_IDX]);
+    struct hd2_buffer* dst_buff = ctx->curr_bufs[DST_BUF_IDX];
     uint16_t dst_width = get_buff_width(dst_buff), dst_height = get_buff_height(dst_buff);
 
     switch (user_cmd->type) {
@@ -163,6 +180,45 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         if (cmd->pos_a_x >= dst_width || cmd->pos_a_y >= dst_height
                 || cmd->pos_b_x >= dst_width || cmd->pos_b_y >= dst_height) {
             DEBUG("draw_line: out of bounds");
+            return -EINVAL;
+        }
+        return 0;
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
+        if (!ctx->curr_bufs[TEXTURE_BUF_IDX]) {
+            DEBUG("draw_column: no texture buffer");
+            return -EINVAL;
+        }
+        const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
+
+        if (cmd->pos_x >= dst_width || cmd->pos_b_y >= dst_height) {
+            DEBUG("draw_column: out of bounds");
+            return -EINVAL;
+        }
+        if (cmd->pos_b_y < cmd->pos_a_y) {
+            DEBUG("draw_column: b_y < a_y");
+            return -EINVAL;
+        }
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE && !ctx->curr_bufs[TRANSLATE_BUF_IDX]) {
+            DEBUG("draw_column: translate flag set but no buf");
+            return -EINVAL;
+        }
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP && !ctx->curr_bufs[COLORMAP_BUFS_IDX]) {
+            DEBUG("draw_column: colormap flag set but no buf");
+            return -EINVAL;
+        }
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP && !ctx->curr_bufs[TRANMAP_BUFS_IDX]) {
+            DEBUG("draw_column: tranmap flag set but no buf");
+            return -EINVAL;
+        }
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE
+                && cmd->translation_idx >= (get_buff_size(ctx->curr_bufs[TRANSLATE_BUF_IDX]) >> 8)) {
+            DEBUG("draw_column: translation idx out of bounds");
+            return -EINVAL;
+        }
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP
+                && cmd->colormap_idx >= (get_buff_size(ctx->curr_bufs[COLORMAP_BUF_IDX]) >> 8)) {
+            DEBUG("draw_column: colormap idx out of bounds");
             return -EINVAL;
         }
         return 0;
@@ -190,7 +246,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         count = MAX_KMALLOC;
     }
 
-    if (!ctx->curr_bufs[0]) {
+    if (!ctx->curr_bufs[DST_BUF_IDX]) {
         DEBUG("write: no dst surface set");
         return -EINVAL;
     }

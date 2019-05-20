@@ -450,6 +450,24 @@ static struct cmd make_cmd(const struct doomdev2_cmd* user_cmd, uint32_t extra_f
             0
         }};
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
+        const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_COLUMN, extra_flags),
+            HARDDOOM2_CMD_W1(
+                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
+                cmd->colormap_idx & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
+            cmd->ustart,
+            cmd->ustep,
+            HARDDOOM2_CMD_W6_B(cmd->texture_offset),
+            HARDDOOM2_CMD_W7_B((get_buff_size(hd2->curr_bufs[TEXTURE_BUF_IDX]) - 1) >> 6, cmd->texture_height)
+        }};
+    }
     }
 
     /* TODO other cmds */
@@ -754,6 +772,9 @@ int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_
     }
 
     DEBUG("create_buffer: %u", params.size);
+    if (!params.size) {
+        return -EINVAL;
+    }
     if (params.size > MAX_BUFFER_SIZE) {
         return -EOVERFLOW;
     }

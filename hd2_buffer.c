@@ -217,6 +217,10 @@ uint16_t get_buff_height(struct hd2_buffer* buff) {
     return buff->height;
 }
 
+size_t get_buff_size(struct hd2_buffer* buff) {
+    return buff->dma_buff.size;
+}
+
 dma_addr_t get_page_table(struct hd2_buffer* buff) {
     return buff->dma_buff.page_table_dev;
 }
