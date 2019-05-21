@@ -468,6 +468,24 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             HARDDOOM2_CMD_W7_B((get_buff_size(hd2->curr_bufs[TEXTURE_BUF_IDX]) - 1) >> 6, cmd->texture_height)
         }};
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
+        const struct coomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_SPAN, extra_flags),
+            HARDDOOM2_CMD_W1(
+                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
+                cmd->colormap_idx & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+            HARDDOOM2_CMD_W2(cmd->pos_a_x, cmd->pos_y, cmd->flat_idx),
+            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_y),
+            cmd->ustart,
+            cmd->ustep,
+            cmd->vstart,
+            cmd->vstep
+        }};
+    }
     }
 
     /* TODO other cmds */
