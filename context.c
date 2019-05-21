@@ -258,7 +258,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
             DEBUG("draw background: out of bounds");
             return -EINVAL;
         }
-        if (cmd->flag_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
+        if (cmd->flat_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
             DEBUG("draw background: flat idx out of bounds");
             return -EINVAL;
         }
@@ -287,7 +287,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
     case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
         if (!ctx->curr_bufs[FLAT_BUF_IDX]) {
             DEBUG("draw span: no flat buffer");
-            reutrn -EINVAL;
+            return -EINVAL;
         }
 
         const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
@@ -299,7 +299,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
             DEBUG("draw span: b_x < a_x");
             return -EINVAL;
         }
-        if (cmd->flag_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
+        if (cmd->flat_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
             DEBUG("draw span: flat idx out of bounds");
             return -EINVAL;
         }

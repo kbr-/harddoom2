@@ -463,7 +463,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             0
         }};
     }
-    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
+    case DOOMDEV2_CMD_TYPE_DRAW_BACKGROUND: {
         const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
         return (struct cmd){ .data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_BACKGROUND, extra_flags),
@@ -472,7 +472,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             0,
             0,
             0,
-            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height),
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, 0),
             0
         }};
     }
@@ -495,7 +495,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
         }};
     }
     case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
-        const struct coomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
+        const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
         if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
         if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
         if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
@@ -513,7 +513,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
         }};
     }
     case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
-        const struct coomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
+        const struct doomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
         return (struct cmd){ .data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_FUZZ, extra_flags),
             HARDDOOM2_CMD_W1(0, cmd->colormap_idx),
