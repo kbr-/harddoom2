@@ -207,6 +207,29 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
     }
 
     switch (user_cmd->type) {
+    case DOOMDEV2_CMD_TYPE_COPY_RECT: {
+        if (!ctx->curr_bufs[SRC_BUF_IDX]) {
+            DEBUG("copy rect: no src buf");
+            return -EINVAL;
+        }
+
+        const struct doomdev2_cmd_copy_rect* cmd = &user_cmd->copy_rect;
+        if ((uint32_t)cmd->pos_dst_x + cmd->width > surf_width ||
+                (uint32_t)cmd->pos_dst_y + cmd->height > surf_height ||
+                (uint32_t)cmd->pos_src_x + cmd->width > surf_width ||
+                (uint32_t)cmd->pos_src_y + cmd->height > surf_height) {
+            DEBUG("copy_rect: out of bounds");
+            return -EINVAL;
+        }
+
+        if (ctx->curr_bufs[DST_BUF_IDX] == ctx->curr_bufs[SRC_BUF_IDX] &&
+               cmd->pos_dst_x < cmd->pos_src_x + cmd->width && cmd->pos_dst_x + cmd->width > cmd->pos_src_x &&
+               cmd->pos_dst_y < cmd->pos_src_y + cmd->height && cmd->pos_dst_y + cmd->height > cmd->pos_src_y) {
+            DEBUG("copy_rect: intersection");
+            return -EINVAL;
+        }
+        return 0;
+    }
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
         const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
         if ((uint32_t)cmd->pos_x + cmd->width > surf_width || (uint32_t)cmd->pos_y + cmd->height > surf_height) {
@@ -266,6 +289,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         if ((err = validate_maps(ctx, cmd->flags, cmd->colormap_idx, cmd->translation_idx))) {
             return err;
         }
+        return 0;
     }
     }
 
