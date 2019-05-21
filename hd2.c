@@ -768,7 +768,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
     cnt_incr(&hd2->batch_cnt);
 
-    set_last_write(hd2->curr_bufs[0], hd2->batch_cnt);
+    set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
 
     /* TODO: update only buffers that were actually used */
     int i;
