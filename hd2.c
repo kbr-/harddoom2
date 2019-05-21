@@ -425,6 +425,11 @@ _Static_assert(sizeof(struct cmd) == 32, "struct cmd size");
 static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
     switch (user_cmd->type) {
     case DOOMDEV2_CMD_TYPE_COPY_RECT: {
+        if (!interlocked(hd2->curr_bufs[SRC_BUF_IDX])) {
+            extra_flags |= HARDDOOM2_CMD_FLAG_INTERLOCK;
+            interlock(hd2->curr_bufs[SRC_BUF_IDX]);
+        }
+
         const struct doomdev2_cmd_copy_rect* cmd = &user_cmd->copy_rect;
         return (struct cmd){ .data = {
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_COPY_RECT, extra_flags),

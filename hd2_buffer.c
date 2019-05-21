@@ -22,6 +22,9 @@ struct hd2_buffer {
     struct counter last_use;
     struct counter last_write;
 
+    /* Did the last write to this buffer by the device happen before the last interlock? */
+    bool interlocked;
+
     /* Non-zero values indicate that this is a surface buffer.
        Zero indicates any other type of buffer (cmd, texture, etc.). */
     uint16_t width;
@@ -167,6 +170,7 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     buff->hd2 = hd2;
     buff->width = width;
     buff->height = height;
+    buff->interlocked = true;
 
     int flags = O_RDWR | O_CLOEXEC;
 
@@ -221,6 +225,10 @@ size_t get_buff_size(const struct hd2_buffer* buff) {
     return buff->dma_buff.size;
 }
 
+bool interlocked(const struct hd2_buffer* buff) {
+    return buff->interlocked;
+}
+
 dma_addr_t get_page_table(struct hd2_buffer* buff) {
     return buff->dma_buff.page_table_dev;
 }
@@ -233,6 +241,11 @@ void set_last_use(struct hd2_buffer* buff, struct counter cnt) {
 void set_last_write(struct hd2_buffer* buff, struct counter cnt) {
     BUG_ON(!cnt_ge(cnt, buff->last_write));
     buff->last_write = cnt;
+    buff->interlocked = false;
+}
+
+void interlock(struct hd2_buffer* buff) {
+    buff->interlocked = true;
 }
 
 struct hd2_buffer* hd2_buff_fd_get(int fd) {

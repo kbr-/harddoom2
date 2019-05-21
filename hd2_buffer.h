@@ -23,11 +23,13 @@ bool is_surface(const struct hd2_buffer*);
 uint16_t get_buff_width(const struct hd2_buffer*);
 uint16_t get_buff_height(const struct hd2_buffer*);
 size_t get_buff_size(const struct hd2_buffer*);
+bool interlocked(const struct hd2_buffer*);
 
 dma_addr_t get_page_table(struct hd2_buffer*);
 
 void set_last_use(struct hd2_buffer*, struct counter cnt);
 void set_last_write(struct hd2_buffer*, struct counter cnt);
+void interlock(struct hd2_buffer*);
 
 struct hd2_buffer* hd2_buff_fd_get(int fd);
 void hd2_buff_get(struct hd2_buffer*);
