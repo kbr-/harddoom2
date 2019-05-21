@@ -517,6 +517,7 @@ static struct cmd make_setup(struct hd2_buffer* bufs[NUM_USER_BUFS], uint32_t ex
 
     uint16_t dst_width = bufs[0] ? get_buff_width(bufs[0]) : 0;
     uint16_t src_width = bufs[1] ? get_buff_width(bufs[1]) : 0;
+    BUG_ON(dst_width && src_width && dst_width != src_width);
 
     struct cmd cmd;
     cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);

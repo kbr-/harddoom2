@@ -115,6 +115,13 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
             goto out_fds;
         }
     }
+    if (bufs[DST_BUF_IDX] && bufs[SRC_BUF_IDX] &&
+            (get_buff_width(bufs[DST_BUF_IDX]) != get_buff_width(bufs[SRC_BUF_IDX]) ||
+             get_buff_height(bufs[DST_BUF_IDX]) != get_buff_height(bufs[SRC_BUF_IDX]))) {
+        /* The only command that uses the the source buffer, COPY_RECT, assumes they have the same dimensions. */
+        DEBUG("setup: different dst and src buf dims");
+        goto out_fds;
+    }
     if (bufs[FLAT_BUF_IDX] && get_buff_size(bufs[FLAT_BUF_IDX]) % (1 << 12)) {
         DEBUG("setup: flat buf wrong size");
         goto out_fds;
@@ -193,12 +200,16 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
     int err;
 
     struct hd2_buffer* dst_buff = ctx->curr_bufs[DST_BUF_IDX];
-    uint16_t dst_width = get_buff_width(dst_buff), dst_height = get_buff_height(dst_buff);
+    uint16_t surf_width = get_buff_width(dst_buff), surf_height = get_buff_height(dst_buff);
+    {
+        struct hd2_buffer* src_buff = ctx->curr_bufs[SRC_BUF_IDX];
+        BUG_ON(src_buff && (get_buff_width(src_buff) != surf_width || get_buff_height(src_buff) != surf_height));
+    }
 
     switch (user_cmd->type) {
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
         const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
-        if ((uint32_t)cmd->pos_x + cmd->width > dst_width || (uint32_t)cmd->pos_y + cmd->height > dst_height) {
+        if ((uint32_t)cmd->pos_x + cmd->width > surf_width || (uint32_t)cmd->pos_y + cmd->height > surf_height) {
             DEBUG("fill_rect: out of bounds");
             return -EINVAL;
         }
@@ -206,8 +217,8 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
     }
     case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
         const struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
-        if (cmd->pos_a_x >= dst_width || cmd->pos_a_y >= dst_height
-                || cmd->pos_b_x >= dst_width || cmd->pos_b_y >= dst_height) {
+        if (cmd->pos_a_x >= surf_width || cmd->pos_a_y >= surf_height
+                || cmd->pos_b_x >= surf_width || cmd->pos_b_y >= surf_height) {
             DEBUG("draw_line: out of bounds");
             return -EINVAL;
         }
@@ -220,7 +231,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         }
 
         const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
-        if (cmd->pos_x >= dst_width || cmd->pos_b_y >= dst_height) {
+        if (cmd->pos_x >= surf_width || cmd->pos_b_y >= surf_height) {
             DEBUG("draw_column: out of bounds");
             return -EINVAL;
         }
@@ -240,7 +251,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         }
 
         const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
-        if (cmd->pos_y >= dst_height || cmd->pos_b_x >= dst_width) {
+        if (cmd->pos_y >= surf_height || cmd->pos_b_x >= surf_width) {
             DEBUG("draw span: out of bounds");
             return -EINVAL;
         }
