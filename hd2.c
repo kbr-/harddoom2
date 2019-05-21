@@ -158,24 +158,25 @@ static irqreturn_t doom_irq_handler(int irq, void* _hd2) {
     return IRQ_NONE;
 }
 
-static void reset_device(void __iomem* bar, dma_addr_t cmds_page_table) {
-    iowrite32(0, bar + HARDDOOM2_FE_CODE_ADDR);
+static void reset_device(struct harddoom2* hd2) {
+    iowrite32(0, hd2->bar + HARDDOOM2_FE_CODE_ADDR);
     for (int i = 0; i < ARRAY_SIZE(doomcode2); ++i) {
-        iowrite32(doomcode2[i], bar + HARDDOOM2_FE_CODE_WINDOW);
+        iowrite32(doomcode2[i], hd2->bar + HARDDOOM2_FE_CODE_WINDOW);
     }
-    iowrite32(HARDDOOM2_RESET_ALL, bar + HARDDOOM2_RESET);
+    iowrite32(HARDDOOM2_RESET_ALL, hd2->bar + HARDDOOM2_RESET);
 
-    iowrite32(cmds_page_table >> 8, bar + HARDDOOM2_CMD_PT);
-    iowrite32(CMD_BUF_LEN, bar + HARDDOOM2_CMD_SIZE);
-    iowrite32(0, bar + HARDDOOM2_CMD_READ_IDX);
-    iowrite32(0, bar + HARDDOOM2_CMD_WRITE_IDX);
+    iowrite32(hd2->cmd_buff.page_table_dev >> 8, hd2->bar + HARDDOOM2_CMD_PT);
+    iowrite32(CMD_BUF_LEN, hd2->bar + HARDDOOM2_CMD_SIZE);
+    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_READ_IDX);
+    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
 
-    iowrite32(HARDDOOM2_INTR_MASK, bar + HARDDOOM2_INTR);
-    iowrite32(HARDDOOM2_INTR_MASK & ~HARDDOOM2_INTR_PONG_ASYNC, bar + HARDDOOM2_INTR_ENABLE);
+    iowrite32(HARDDOOM2_INTR_MASK, hd2->bar + HARDDOOM2_INTR);
+    iowrite32(HARDDOOM2_INTR_MASK & ~HARDDOOM2_INTR_PONG_ASYNC, hd2->bar + HARDDOOM2_INTR_ENABLE);
 
-    iowrite32(0, bar + HARDDOOM2_FENCE_COUNTER);
+    iowrite32(cnt_lower(hd2->batch_cnt), hd2->bar + HARDDOOM2_FENCE_COUNTER);
+    iowrite32(cnt_lower(hd2->batch_cnt), hd2->bar + HARDDOOM2_FENCE_WAIT);
 
-    iowrite32(HARDDOOM2_ENABLE_ALL, bar + HARDDOOM2_ENABLE);
+    iowrite32(HARDDOOM2_ENABLE_ALL, hd2->bar + HARDDOOM2_ENABLE);
 }
 
 static void device_off(void __iomem* bar) {
@@ -275,7 +276,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
         goto err_irq;
     }
 
-    reset_device(bar, hd2->cmd_buff.page_table_dev);
+    reset_device(hd2);
 
     cdev_init(&hd2->cdev, context_ops);
     hd2->cdev.owner = THIS_MODULE;
@@ -349,21 +350,37 @@ static void pci_remove(struct pci_dev* pdev) {
     pci_disable_device(pdev);
 }
 
-static int pci_suspend(struct pci_dev* dev, pm_message_t state) {
+static int pci_suspend(struct pci_dev* pdev, pm_message_t state) {
     DEBUG("suspend");
-    /* TODO cleanup */
+    struct harddoom2* hd2 = pci_get_drvdata(pdev);
+
+    wait_for_fence_cnt(hd2, hd2->batch_cnt);
+    device_off(hd2->bar);
+
     return 0;
 }
 
-static int pci_resume(struct pci_dev* dev) {
+static int pci_resume(struct pci_dev* pdev) {
     DEBUG("resume");
-    /* TODO: resume */
+    struct harddoom2* hd2 = pci_get_drvdata(pdev);
+
+    hd2->write_idx = 0;
+    reset_device(hd2);
+
+    struct cmd dev_cmd = make_setup(hd2->curr_bufs, HARDDOOM2_CMD_FLAG_FENCE);
+    write_cmd(hd2, &dev_cmd, 0);
+
+    hd2->write_idx = 1;
+    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    cnt_incr(&hd2->batch_cnt);
+
     return 0;
 }
 
 static void pci_shutdown(struct pci_dev* dev) {
     DEBUG("shutdown");
-    /* TODO cleanup */
+    struct harddoom2* hd2 = pci_get_drvdata(pdev);
+    device_off(hd2->bar);
 }
 
 static struct pci_driver pci_drv = {
