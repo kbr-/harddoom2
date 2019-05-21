@@ -308,11 +308,35 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         }
         return 0;
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
+        if (!ctx->curr_bufs[COLORMAP_BUF_IDX]) {
+            DEBUG("draw fuzz: no colormap");
+            return -EINVAL;
+        }
+
+        const struct doomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
+        if (cmd->pos_x >= surf_width || cmd->fuzz_end >= surf_height) {
+            DEBUG("draw fuzz: out of bounds");
+            return -EINVAL;
+        }
+        if (cmd->fuzz_start > cmd->pos_a_y || cmd->pos_a_y > cmd->pos_b_y || cmd->pos_b_y > cmd->fuzz_end) {
+            DEBUG("draw fuzz: inequalities");
+            return -EINVAL;
+        }
+        if (cmd->colormap_idx >= (get_buff_size(ctx->curr_bufs[COLORMAP_BUF_IDX]) >> 8)) {
+            DEBUG("draw fuzz: colormap idx out of bounds");
+            return -EINVAL;
+        }
+        if (cmd->fuzz_pos > 55) {
+            DEBUG("draw fuzz: fuzz_pos > 55");
+            return -EINVAL;
+        }
+        return 0;
+    }
     }
 
-    /* TODO: other cmds */
-
-    return 0;
+    DEBUG("unknown cmd type: %u", user_cmd->type);
+    return -EINVAL;
 }
 
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {

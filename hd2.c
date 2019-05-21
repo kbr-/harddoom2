@@ -485,7 +485,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_COLUMN, extra_flags),
             HARDDOOM2_CMD_W1(
                 cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
-                cmd->colormap_idx & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
             HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
             HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
             cmd->ustart,
@@ -503,7 +503,7 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_SPAN, extra_flags),
             HARDDOOM2_CMD_W1(
                 cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
-                cmd->colormap_idx & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
             HARDDOOM2_CMD_W2(cmd->pos_a_x, cmd->pos_y, cmd->flat_idx),
             HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_y),
             cmd->ustart,
@@ -512,20 +512,22 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             cmd->vstep
         }};
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
+        const struct coomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_FUZZ, extra_flags),
+            HARDDOOM2_CMD_W1(0, cmd->colormap_idx),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
+            0,
+            0,
+            HARDDOOM2_CMD_W6_C(cmd->fuzz_start, cmd->fuzz_end, cmd->fuzz_pos),
+            0
+        }};
+    }
     }
 
-    /* TODO other cmds */
-
-    return (struct cmd){ .data = {
-        HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
-        0,
-        HARDDOOM2_CMD_W3(0, 0),
-        0,
-        0,
-        0,
-        HARDDOOM2_CMD_W6_A(1, 1, 0),
-        0
-    }};
+    BUG();
 }
 
 static struct cmd make_setup(struct hd2_buffer* bufs[NUM_USER_BUFS], uint32_t extra_flags) {
