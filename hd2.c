@@ -770,9 +770,10 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
 
     set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
 
-    /* TODO: update only buffers that were actually used */
-    int i;
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
+    /* 'last use' is needed by the driver to wait until commands using this buffer finish
+       when the user wants to write to this buffer. Since the user doesn't do that very often,
+       we don't care to set last use on specific buffers only - we set it on all installed buffers. */
+    for (int i = 0; i < NUM_USER_BUFS; ++i) {
         if(hd2->curr_bufs[i]) {
             set_last_use(hd2->curr_bufs[i], hd2->batch_cnt);
         }
