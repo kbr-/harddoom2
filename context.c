@@ -79,7 +79,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
     }
 
     int32_t fds[NUM_USER_BUFS] = { params.surf_dst_fd, params.surf_src_fd, params.texture_fd,
-        params.flat_fd, params.colormap_fd, params.translation_fd, params.tranmap_fd };
+        params.flat_fd, params.translation_fd, params.colormap_fd, params.tranmap_fd };
     struct hd2_buffer* bufs[NUM_USER_BUFS] = { NULL };
 
     int err;
@@ -203,11 +203,11 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
             DEBUG("draw_column: translate flag set but no buf");
             return -EINVAL;
         }
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP && !ctx->curr_bufs[COLORMAP_BUFS_IDX]) {
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP && !ctx->curr_bufs[COLORMAP_BUF_IDX]) {
             DEBUG("draw_column: colormap flag set but no buf");
             return -EINVAL;
         }
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP && !ctx->curr_bufs[TRANMAP_BUFS_IDX]) {
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP && !ctx->curr_bufs[TRANMAP_BUF_IDX]) {
             DEBUG("draw_column: tranmap flag set but no buf");
             return -EINVAL;
         }

@@ -422,7 +422,7 @@ struct cmd {
 
 _Static_assert(sizeof(struct cmd) == 32, "struct cmd size");
 
-static struct cmd make_cmd(const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
+static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
     switch (user_cmd->type) {
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
         const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
@@ -487,8 +487,8 @@ static struct cmd make_cmd(const struct doomdev2_cmd* user_cmd, uint32_t extra_f
 static struct cmd make_setup(struct hd2_buffer* bufs[NUM_USER_BUFS], uint32_t extra_flags) {
     static const uint32_t bufs_flags[NUM_USER_BUFS] = {
         HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
-        HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP,
-        HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
+        HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT,
+        HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
 
     int i;
     for (i = 0; i < NUM_USER_BUFS; ++i) {
@@ -701,7 +701,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
     for (size_t it = 0; it < num_cmds - 1; ++it) {
-        struct cmd dev_cmd = make_cmd(&cmds[it], extra_flags);
+        struct cmd dev_cmd = make_cmd(hd2, &cmds[it], extra_flags);
         write_cmd(hd2, &dev_cmd, write_idx);
 
         write_idx = (write_idx + 1) % CMD_BUF_LEN;
@@ -709,7 +709,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     }
 
     extra_flags |= HARDDOOM2_CMD_FLAG_FENCE;
-    struct cmd dev_cmd = make_cmd(&cmds[num_cmds - 1], extra_flags);
+    struct cmd dev_cmd = make_cmd(hd2, &cmds[num_cmds - 1], extra_flags);
     write_cmd(hd2, &dev_cmd, write_idx);
 
     hd2->write_idx = (write_idx + 1) % CMD_BUF_LEN;

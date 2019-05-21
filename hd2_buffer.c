@@ -201,23 +201,23 @@ out_buff:
     return err;
 }
 
-bool is_surface(struct hd2_buffer* buff) {
+bool is_surface(const struct hd2_buffer* buff) {
     return buff->width != 0;
 }
 
-uint16_t get_buff_width(struct hd2_buffer* buff) {
+uint16_t get_buff_width(const struct hd2_buffer* buff) {
     /* We only perform this on surface buffers. */
     BUG_ON(!buff->width || !buff->height);
     return buff->width;
 }
 
-uint16_t get_buff_height(struct hd2_buffer* buff) {
+uint16_t get_buff_height(const struct hd2_buffer* buff) {
     /* We only perform this on surface buffers. */
     BUG_ON(!buff->width || !buff->height);
     return buff->height;
 }
 
-size_t get_buff_size(struct hd2_buffer* buff) {
+size_t get_buff_size(const struct hd2_buffer* buff) {
     return buff->dma_buff.size;
 }
 
