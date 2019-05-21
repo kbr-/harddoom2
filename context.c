@@ -247,6 +247,23 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
         }
         return 0;
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_BACKGROUND: {
+        if (!ctx->curr_bufs[FLAT_BUF_IDX]) {
+            DEBUG("draw background: no flat buf");
+            return -EINVAL;
+        }
+
+        const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
+        if ((uint32_t)cmd->pos_x + cmd->width > surf_width || (uint32_t)cmd->pos_y + cmd->height > surf_height) {
+            DEBUG("draw background: out of bounds");
+            return -EINVAL;
+        }
+        if (cmd->flag_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
+            DEBUG("draw background: flat idx out of bounds");
+            return -EINVAL;
+        }
+        return 0;
+    }
     case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
         if (!ctx->curr_bufs[TEXTURE_BUF_IDX]) {
             DEBUG("draw_column: no texture buffer");

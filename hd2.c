@@ -463,6 +463,19 @@ static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cm
             0
         }};
     }
+    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
+        const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_BACKGROUND, extra_flags),
+            0,
+            HARDDOOM2_CMD_W2(cmd->pos_x, cmd->pos_y, cmd->flat_idx),
+            0,
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height),
+            0
+        }};
+    }
     case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
         const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
         if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
