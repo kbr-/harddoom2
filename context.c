@@ -139,10 +139,12 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         goto out_fds;
     }
 
+    /* TODO mutex lock */
     for (j = 0; j < NUM_USER_BUFS; ++j) {
         hd2_buff_put(ctx->curr_bufs[j]);
         ctx->curr_bufs[j] = bufs[j];
     }
+    /* TODO mutex unlock */
 
     return 0;
 
@@ -344,8 +346,6 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     _Static_assert(MAX_KMALLOC <= LONG_MAX && sizeof(ssize_t) == sizeof(long), "ssize max");
     ssize_t err;
 
-    struct context* ctx = get_ctx(file);
-
     if (!count || count % sizeof(struct doomdev2_cmd) != 0) {
         DEBUG("context_write: wrong count %lu", count);
         return -EINVAL;
@@ -353,11 +353,6 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
     if (count > MAX_KMALLOC) {
         count = MAX_KMALLOC;
-    }
-
-    if (!ctx->curr_bufs[DST_BUF_IDX]) {
-        DEBUG("write: no dst surface set");
-        return -EINVAL;
     }
 
     void* buf = kmalloc(count, GFP_KERNEL);
@@ -374,6 +369,15 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
     size_t num_cmds = count / sizeof(struct doomdev2_cmd);
     struct doomdev2_cmd* cmds = (struct doomdev2_cmd*)buf;
+
+    struct context* ctx = get_ctx(file);
+
+    /* TODO mutex lock */
+    if (!ctx->curr_bufs[DST_BUF_IDX]) {
+        DEBUG("write: no dst surface set");
+        err = -EINVAL;
+        goto out_copy;
+    }
 
     size_t it;
     for (it = 0; it < num_cmds; ++it) {
@@ -396,6 +400,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     }
 
 out_copy:
+    /* TODO mutex unlock */
     kfree(buf);
     return err;
 }
