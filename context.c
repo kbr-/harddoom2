@@ -10,7 +10,8 @@
 
 #include "context.h"
 
-#define MAX_KMALLOC (128 * 1024)
+/* Maximum number of commands processed in a single write. */
+#define MAX_CMDS 1024
 
 static int context_open(struct inode* inode, struct file* file);
 static int context_release(struct inode* inode, struct file* file);
@@ -31,6 +32,7 @@ const struct file_operations* const context_ops = &_context_ops;
 struct context {
     struct harddoom2* hd2;
     struct hd2_buffer* curr_bufs[NUM_USER_BUFS];
+    struct doomdev2_cmd cmds[MAX_CMDS];
     struct mutex mut;
 };
 
@@ -343,8 +345,6 @@ static bool validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cm
 }
 
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
-    _Static_assert(MAX_KMALLOC % sizeof(struct doomdev2_cmd) == 0, "cmd size mismatch");
-    _Static_assert(MAX_KMALLOC <= LONG_MAX && sizeof(ssize_t) == sizeof(long), "ssize max");
     ssize_t err;
 
     if (!count || count % sizeof(struct doomdev2_cmd) != 0) {
@@ -352,24 +352,10 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         return -EINVAL;
     }
 
-    if (count > MAX_KMALLOC) {
-        count = MAX_KMALLOC;
-    }
-
-    void* buf = kmalloc(count, GFP_KERNEL);
-    if (!buf) {
-        DEBUG("context_write: kmalloc fail");
-        return -ENOMEM;
-    }
-
-    if (copy_from_user(buf, _buf, count)) {
-        DEBUG("context_write: copy from user fail");
-        err = -EFAULT;
-        goto out_copy;
-    }
-
     size_t num_cmds = count / sizeof(struct doomdev2_cmd);
-    struct doomdev2_cmd* cmds = (struct doomdev2_cmd*)buf;
+    if (num_cmds > MAX_CMDS) {
+        num_cmds = MAX_CMDS;
+    }
 
     struct context* ctx = get_ctx(file);
 
@@ -380,9 +366,15 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         goto out_surf;
     }
 
+    if (copy_from_user(ctx->cmds, _buf, num_cmds * sizeof(struct doomdev2_cmd))) {
+        DEBUG("context_write: copy from user fail");
+        err = -EFAULT;
+        goto out_surf;
+    }
+
     size_t it;
     for (it = 0; it < num_cmds; ++it) {
-        if (!validate_cmd(ctx, &cmds[it])) {
+        if (!validate_cmd(ctx, &ctx->cmds[it])) {
             err = -EINVAL;
             break;
         }
@@ -395,7 +387,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     }
 
     num_cmds = it;
-    err = harddoom2_write(ctx->hd2, ctx->curr_bufs, cmds, num_cmds);
+    err = harddoom2_write(ctx->hd2, ctx->curr_bufs, ctx->cmds, num_cmds);
     BUG_ON(!err || err > num_cmds);
     if (err > 0) {
         err *= sizeof(struct doomdev2_cmd);
@@ -403,7 +395,5 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
 out_surf:
     mutex_unlock(&ctx->mut);
-out_copy:
-    kfree(buf);
     return err;
 }
