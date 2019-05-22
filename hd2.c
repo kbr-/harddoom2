@@ -528,17 +528,16 @@ int harddoom2_init_dma_buff(struct harddoom2* hd2, struct dma_buffer* buff, size
     return init_dma_buff(buff, size, &hd2->pdev->dev);
 }
 
-static int dev_counter = 0;
 static DECLARE_BITMAP(dev_numbers, DEVICES_LIMIT);
-static spinlock_t dev_numbers_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(dev_numbers_lock);
 
 static int alloc_dev_number(void) {
     int ret = -ENOSPC;
 
     spin_lock(&dev_numbers_lock);
-    unsigned long bit = find_first_zero_bit(&dev_numbers, DEVICES_LIMIT);
+    unsigned long bit = find_first_zero_bit(dev_numbers, DEVICES_LIMIT);
     if (bit != DEVICES_LIMIT) {
-        set_bit(bit, &dev_numbers);
+        set_bit(bit, dev_numbers);
         ret = (int)bit;
     }
     spin_unlock(&dev_numbers_lock);
@@ -547,8 +546,8 @@ static int alloc_dev_number(void) {
 
 static void free_dev_number(unsigned number) {
     spin_lock(&dev_numbers_lock);
-    BUG_ON(!test_bit(number, &dev_numbers));
-    clear_bit(number, &dev_numbers);
+    BUG_ON(!test_bit(number, dev_numbers));
+    clear_bit(number, dev_numbers);
     spin_unlock(&dev_numbers_lock);
 }
 
