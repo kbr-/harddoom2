@@ -369,8 +369,12 @@ static void collect_buffers(struct harddoom2* hd2) {
 }
 
 static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
+    /* CMD_BUF_LEN has to be a power of 2 so that the below calculation is correct. */
+    _Static_assert(CMD_BUF_LEN && !(CMD_BUF_LEN & (CMD_BUF_LEN - 1)), "cmd buf len");
+
     spin_lock(&hd2->write_idx_lock);
-    uint32_t ret = ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1;
+    uint32_t ret = (ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX)
+            - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1) % CMD_BUF_LEN;
     spin_unlock(&hd2->write_idx_lock);
     return ret;
 }
