@@ -19,7 +19,10 @@ struct hd2_buffer {
     struct file* f;
 
     /* When was the buffer last written to/read from by the device? */
+    spinlock_t last_use_lock;
     counter last_use;
+
+    spinlock_t last_write_lock;
     counter last_write;
 
     /* Did the last write to this buffer by the device happen before the last interlock? */
@@ -168,6 +171,9 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     buff->height = height;
     buff->interlocked = true;
 
+    spin_lock_init(&buff->last_use_lock);
+    spin_lock_init(&buff->last_write_lock);
+
     int flags = O_RDWR | O_CLOEXEC;
 
     int fd = get_unused_fd_flags(flags);
@@ -226,21 +232,33 @@ dma_addr_t get_page_table(struct hd2_buffer* buff) {
 }
 
 counter get_last_use(const struct hd2_buffer* buff) {
-    return buff->last_use; /* TODO lock */
+    counter res;
+    spin_lock(&buff->last_use_lock);
+    res = buff->last_use;
+    spin_unlock(&buff->last_use_lock);
+    return res;
 }
 
 void set_last_use(struct hd2_buffer* buff, counter cnt) {
+    spin_lock(&buff->last_use_lock);
     BUG_ON(cnt < buff->last_use);
-    buff->last_use = cnt; /* TODO lock */
+    buff->last_use = cnt;
+    spin_unlock(&buff->last_use_lock);
 }
 
 counter get_last_write(const struct hd2_buffer* buff) {
-    return buff->last_write; /* TODO lock */
+    counter res;
+    spin_lock(&buff->last_write_lock);
+    res = buff->last_write;
+    spin_unlock(&buff->last_write_lock);
+    return res;
 }
 
 void set_last_write(struct hd2_buffer* buff, counter cnt) {
+    spin_lock(&buff->last_write_lock);
     BUG_ON(cnt < buff->last_write);
-    buff->last_write = cnt; /* TODO lock */
+    buff->last_write = cnt;
+    spin_unlock(&buff->last_write_lock);
     buff->interlocked = false;
 }
 
