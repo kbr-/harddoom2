@@ -19,8 +19,8 @@ struct hd2_buffer {
     struct file* f;
 
     /* When was the buffer last written to/read from by the device? */
-    struct counter last_use;
-    struct counter last_write;
+    counter last_use;
+    counter last_write;
 
     /* Did the last write to this buffer by the device happen before the last interlock? */
     bool interlocked;
@@ -63,14 +63,12 @@ static ssize_t hd2_buff_write(struct file* file, const char __user* _buff, size_
         return -EINVAL;
     }
 
-    /* TODO mutex lock */
-    struct counter last_use = buff->last_use;
-    /* unlock */
+    counter last_use = get_last_use(buff);
 
     wait_for_fence_cnt(buff->hd2, last_use);
     /* Someone might have moved buff->last_use forward by now, but we don't care.
-       It's the user's responsibility not to send any more commands using this buffer
-       in the middle of a buffer_write or buffer_read call. */
+       If the user doesn't want to see any artifacts, it's their responsibility not to send
+       any commands using this buffer in parallel with a buffer_write or buffer_read call. */
 
     ssize_t ret = write_dma_buff_user(&buff->dma_buff, _buff, *off, count);
     if (ret < 0) {
@@ -103,9 +101,7 @@ static ssize_t hd2_buff_read(struct file* file, char __user *_buff, size_t count
         return -EINVAL;
     }
 
-    /* TODO mutex lock */
-    struct counter last_write = buff->last_write;
-    /* unlock */
+    counter last_write = get_last_write(buff);
 
     wait_for_fence_cnt(buff->hd2, last_write);
     /* See comment in buffer_write. */
@@ -225,23 +221,31 @@ size_t get_buff_size(const struct hd2_buffer* buff) {
     return buff->dma_buff.size;
 }
 
-bool interlocked(const struct hd2_buffer* buff) {
-    return buff->interlocked;
-}
-
 dma_addr_t get_page_table(struct hd2_buffer* buff) {
     return buff->dma_buff.page_table_dev;
 }
 
-void set_last_use(struct hd2_buffer* buff, struct counter cnt) {
-    BUG_ON(!cnt_ge(cnt, buff->last_use));
-    buff->last_use = cnt;
+counter get_last_use(const struct hd2_buffer* buff) {
+    return buff->last_use; /* TODO lock */
 }
 
-void set_last_write(struct hd2_buffer* buff, struct counter cnt) {
-    BUG_ON(!cnt_ge(cnt, buff->last_write));
-    buff->last_write = cnt;
+void set_last_use(struct hd2_buffer* buff, counter cnt) {
+    BUG_ON(cnt < buff->last_use);
+    buff->last_use = cnt; /* TODO lock */
+}
+
+counter get_last_write(const struct hd2_buffer* buff) {
+    return buff->last_write; /* TODO lock */
+}
+
+void set_last_write(struct hd2_buffer* buff, counter cnt) {
+    BUG_ON(cnt < buff->last_write);
+    buff->last_write = cnt; /* TODO lock */
     buff->interlocked = false;
+}
+
+bool interlocked(const struct hd2_buffer* buff) {
+    return buff->interlocked;
 }
 
 void interlock(struct hd2_buffer* buff) {

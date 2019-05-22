@@ -22,13 +22,18 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
 bool is_surface(const struct hd2_buffer*);
 uint16_t get_buff_width(const struct hd2_buffer*);
 uint16_t get_buff_height(const struct hd2_buffer*);
+
 size_t get_buff_size(const struct hd2_buffer*);
-bool interlocked(const struct hd2_buffer*);
 
 dma_addr_t get_page_table(struct hd2_buffer*);
 
-void set_last_use(struct hd2_buffer*, struct counter cnt);
-void set_last_write(struct hd2_buffer*, struct counter cnt);
+counter get_last_use(const struct hd2_buffer*);
+void set_last_use(struct hd2_buffer*, counter cnt);
+
+counter get_last_write(const struct hd2_buffer*);
+void set_last_write(struct hd2_buffer*, counter cnt);
+
+bool interlocked(const struct hd2_buffer*);
 void interlock(struct hd2_buffer*);
 
 struct hd2_buffer* hd2_buff_fd_get(int fd);

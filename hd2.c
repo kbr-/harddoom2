@@ -48,12 +48,10 @@ struct harddoom2 {
 
     struct dma_buffer cmd_buff;
 
-    uint32_t write_idx;
+    counter batch_cnt;
 
-    struct counter batch_cnt;
-
-    struct counter last_fence_cnt;
-    struct counter last_fence_wait;
+    counter last_fence_cnt;
+    counter last_fence_wait;
 
     /* Used to wait for free space in the command buffer. */
     wait_queue_head_t write_wq;
@@ -77,7 +75,7 @@ struct buffer_change {
     struct hd2_buffer* bufs[NUM_USER_BUFS];
 
     /* Number of the batch in which this set of buffers was removed */
-    struct counter cnt;
+    counter batch_cnt;
 
     struct list_head list;
 };
@@ -167,8 +165,8 @@ static void reset_device(struct harddoom2* hd2) {
 
     iowrite32(hd2->cmd_buff.page_table_dev >> 8, hd2->bar + HARDDOOM2_CMD_PT);
     iowrite32(CMD_BUF_LEN, hd2->bar + HARDDOOM2_CMD_SIZE);
-    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_READ_IDX);
-    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    iowrite32(0, hd2->bar + HARDDOOM2_CMD_READ_IDX);
+    iowrite32(0, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
 
     iowrite32(HARDDOOM2_INTR_MASK, hd2->bar + HARDDOOM2_INTR);
     iowrite32(HARDDOOM2_INTR_MASK & ~HARDDOOM2_INTR_PONG_ASYNC, hd2->bar + HARDDOOM2_INTR_ENABLE);
@@ -364,15 +362,13 @@ static int pci_resume(struct pci_dev* pdev) {
     DEBUG("resume");
     struct harddoom2* hd2 = pci_get_drvdata(pdev);
 
-    hd2->write_idx = 0;
     reset_device(hd2);
 
     struct cmd dev_cmd = make_setup(hd2->curr_bufs, HARDDOOM2_CMD_FLAG_FENCE);
     write_cmd(hd2, &dev_cmd, 0);
 
-    hd2->write_idx = 1;
-    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
-    cnt_incr(&hd2->batch_cnt);
+    iowrite32(1, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    ++hd2->batch_cnt;
 
     return 0;
 }
@@ -587,7 +583,7 @@ static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) 
     return write_dma_buff(buff, cmd->data, dst_pos, CMD_SEND_BYTES);
 }
 
-static int setup_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS]) {
+static int update_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS]) {
     int has_change = 0;
     int is_diff = 0;
 
@@ -613,7 +609,7 @@ static int setup_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER
             return -ENOMEM;
         }
 
-        change->cnt = hd2->batch_cnt;
+        change->batch_cnt = hd2->batch_cnt;
         list_add_tail(&change->list, &hd2->changes_queue);
     }
 
@@ -630,11 +626,6 @@ static int setup_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER
         hd2->curr_bufs[i] = bufs[i];
     }
 
-    struct cmd dev_cmd = make_setup(hd2->curr_bufs,
-            (hd2->write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC);
-    write_cmd(hd2, &dev_cmd, hd2->write_idx);
-    hd2->write_idx = (hd2->write_idx + 1) % CMD_BUF_LEN;
-
     return 1;
 }
 
@@ -649,9 +640,9 @@ static void _update_last_fence_cnt(struct harddoom2* hd2) {
     hd2->last_fence_cnt = make_cnt(upper, curr_lower);
 }
 
-void bump_fence_wait(struct harddoom2* hd2, struct counter cnt) {
+static void bump_fence_wait(struct harddoom2* hd2, counter cnt) {
     /* TODO spinlock */
-    if (!cnt_ge(cnt, hd2->last_fence_wait)) {
+    if (cnt < hd2->last_fence_wait) {
         goto out;
     }
 
@@ -663,8 +654,8 @@ out:
     return;
 }
 
-struct counter get_curr_fence_cnt(struct harddoom2* hd2) {
-    struct counter res;
+static counter get_curr_fence_cnt(struct harddoom2* hd2) {
+    counter res;
     /* TODO spinlock */
     _update_last_fence_cnt(hd2);
     res = hd2->last_fence_cnt;
@@ -672,34 +663,34 @@ struct counter get_curr_fence_cnt(struct harddoom2* hd2) {
     return res;
 }
 
-void wait_for_fence_cnt(struct harddoom2* hd2, struct counter cnt) {
-    if (cnt_ge(get_curr_fence_cnt(hd2), cnt)) {
+void wait_for_fence_cnt(struct harddoom2* hd2, counter cnt) {
+    if (get_curr_fence_cnt(hd2) >= cnt) {
         return;
     }
 
     bump_fence_wait(hd2, cnt);
-    if (cnt_ge(get_curr_fence_cnt(hd2), cnt)) {
+    if (get_curr_fence_cnt(hd2) >= cnt) {
         return;
     }
 
     DEBUG("wait for fence: %llu", cnt.val);
 
-    wait_event(hd2->fence_wq, cnt_ge(get_curr_fence_cnt(hd2), cnt));
+    wait_event(hd2->fence_wq, get_curr_fence_cnt(hd2) >= cnt);
 
     DEBUG("wait for fence: %llu finished", cnt.val);
 }
 
-void update_last_fence_cnt(struct harddoom2* hd2) {
+static void update_last_fence_cnt(struct harddoom2* hd2) {
     /* TODO spinlock */
     _update_last_fence_cnt(hd2);
 }
 
 static void collect_buffers(struct harddoom2* hd2) {
-    struct counter cnt = get_curr_fence_cnt(hd2);
+    counter cnt = get_curr_fence_cnt(hd2);
     while (!list_empty(&hd2->changes_queue)) {
         struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
 
-        if (!cnt_ge(cnt, change->cnt)) {
+        if (cnt < change->batch_cnt) {
             return;
         }
 
@@ -711,7 +702,7 @@ static void collect_buffers(struct harddoom2* hd2) {
 }
 
 static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
-    return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - hd2->write_idx - 1;
+    return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1; /* TODO lock */
 }
 
 static void enable_intr(struct harddoom2* hd2, uint32_t intr) {
@@ -725,6 +716,7 @@ static void disable_intr(struct harddoom2* hd2, uint32_t intr) {
 }
 
 static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
+    /* TODO lock */
     iowrite32(intr, hd2->bar + HARDDOOM2_INTR);
 }
 
@@ -752,11 +744,19 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
 
     uint32_t space = get_cmd_buf_space(hd2);
 
-    int set = setup_buffers(hd2, bufs);
+    uint32_t write_idx = ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX); /* TODO lock */
+    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
+
+    int set = update_buffers(hd2, bufs);
     if (set < 0) {
         DEBUG("write: could not setup");
         goto out_setup;
     } else if (set) {
+        struct cmd dev_cmd = make_setup(hd2->curr_bufs, extra_flags);
+        write_cmd(hd2, &dev_cmd, write_idx);
+
+        write_idx = (write_idx + 1) % CMD_BUF_LEN;
+        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
         --space;
     }
 
@@ -765,9 +765,6 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     }
 
     BUG_ON(!num_cmds);
-
-    uint32_t write_idx = hd2->write_idx;
-    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
     for (size_t it = 0; it < num_cmds - 1; ++it) {
         struct cmd dev_cmd = make_cmd(hd2, &cmds[it], extra_flags);
@@ -781,9 +778,9 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     struct cmd dev_cmd = make_cmd(hd2, &cmds[num_cmds - 1], extra_flags);
     write_cmd(hd2, &dev_cmd, write_idx);
 
-    hd2->write_idx = (write_idx + 1) % CMD_BUF_LEN;
-    iowrite32(hd2->write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
-    cnt_incr(&hd2->batch_cnt);
+    write_idx = (write_idx + 1) % CMD_BUF_LEN;
+    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX); /* TODO lock */
+    ++hd2->batch_cnt;
 
     set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
 
@@ -791,7 +788,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
        when the user wants to write to this buffer. Since the user doesn't do that very often,
        we don't care to set last use on specific buffers only - we set it on all installed buffers. */
     for (int i = 0; i < NUM_USER_BUFS; ++i) {
-        if(hd2->curr_bufs[i]) {
+        if (hd2->curr_bufs[i]) {
             set_last_use(hd2->curr_bufs[i], hd2->batch_cnt);
         }
     }
