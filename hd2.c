@@ -56,6 +56,8 @@ struct harddoom2 {
     spinlock_t fence_wait_lock;
     counter last_fence_wait;
 
+    spinlock_t intr_flags_lock;
+
     /* Used to wait for free space in the command buffer. */
     wait_queue_head_t write_wq;
 
@@ -139,9 +141,11 @@ static irqreturn_t doom_irq_handler(int irq, void* _hd2) {
     struct harddoom2* hd2 = _hd2;
     BUG_ON(!hd2);
 
-    /* TODO synchro */
+    unsigned long flags;
+    spin_lock_irqsave(&hd2->intr_flags_lock, flags);
     uint32_t active = ioread32(hd2->bar + HARDDOOM2_INTR);
     iowrite32(active, hd2->bar + HARDDOOM2_INTR);
+    spin_unlock_irqrestore(&hd2->intr_flags_lock, flags);
 
     int served = 0;
     for (int i = 0; i < NUM_INTR_BITS; ++i) {
@@ -268,6 +272,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
 
     spin_lock_init(&hd2->fence_cnt_lock);
     spin_lock_init(&hd2->fence_wait_lock);
+    spin_lock_init(&hd2->intr_flags_lock);
 
     init_waitqueue_head(&hd2->write_wq);
     init_waitqueue_head(&hd2->fence_wq);
@@ -711,19 +716,19 @@ static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
     return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1; /* TODO lock */
 }
 
-static void enable_intr(struct harddoom2* hd2, uint32_t intr) {
-    /* TODO synchro */
+static void _enable_intr(struct harddoom2* hd2, uint32_t intr) {
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
-static void disable_intr(struct harddoom2* hd2, uint32_t intr) {
-    /* TODO synchro */
+static void _disable_intr(struct harddoom2* hd2, uint32_t intr) {
     iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
 static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
-    /* TODO lock */
+    unsigned long flags;`
+    spin_lock_irqsave(&hd2->intr_flags_lock, flags);
     iowrite32(intr, hd2->bar + HARDDOOM2_INTR);
+    spin_lock_irqrestore(&hd2->intr_flags_lock, flags);
 }
 
 ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS],
@@ -736,7 +741,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
         if (get_cmd_buf_space(hd2) >= 2) {
             break;
         }
-        enable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
+        _enable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
         /* TODO unlock */
 
         wait_event(hd2->write_wq, get_cmd_buf_space(hd2) >= 2);
@@ -744,7 +749,7 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
         /* TODO mutex lock */
     }
 
-    disable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
+    _disable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
     /* If anyone was waiting on the event queue, let them enable the interrupt again. */
     wake_up_all(&hd2->write_wq);
 
