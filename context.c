@@ -31,6 +31,7 @@ const struct file_operations* const context_ops = &_context_ops;
 struct context {
     struct harddoom2* hd2;
     struct hd2_buffer* curr_bufs[NUM_USER_BUFS];
+    struct mutex mut;
 };
 
 static struct context* get_ctx(struct file* file) {
@@ -56,6 +57,8 @@ static int context_open(struct inode* inode, struct file* file) {
     }
 
     ctx->hd2 = get_hd2(number);
+    mutex_init(&ctx->mut);
+
     file->private_data = ctx;
 
     return 0;
@@ -139,12 +142,12 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
         goto out_fds;
     }
 
-    /* TODO mutex lock */
+    mutex_lock(&ctx->mut);
     for (j = 0; j < NUM_USER_BUFS; ++j) {
         hd2_buff_put(ctx->curr_bufs[j]);
         ctx->curr_bufs[j] = bufs[j];
     }
-    /* TODO mutex unlock */
+    mutex_unlock(&ctx->mut);
 
     return 0;
 
@@ -372,7 +375,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
     struct context* ctx = get_ctx(file);
 
-    /* TODO mutex lock */
+    mutex_lock(&ctx->mut);
     if (!ctx->curr_bufs[DST_BUF_IDX]) {
         DEBUG("write: no dst surface set");
         err = -EINVAL;
@@ -400,7 +403,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     }
 
 out_copy:
-    /* TODO mutex unlock */
+    mutex_unlock(&ctx->mut);
     kfree(buf);
     return err;
 }
