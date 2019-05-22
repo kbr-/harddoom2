@@ -13,7 +13,6 @@ _Static_assert(LONG_MAX >= MAX_BUFFER_PAGES * HARDDOOM2_PAGE_SIZE && sizeof(ssiz
 int init_dma_buff(struct dma_buffer* buff, size_t size, struct device* dev) {
     BUG_ON(size > MAX_BUFFER_PAGES * HARDDOOM2_PAGE_SIZE);
 
-    /* TODO: does dma_alloc_coherent require synchro? (and free) */
     buff->page_table_kern = dma_alloc_coherent(dev, HARDDOOM2_PAGE_SIZE, &buff->page_table_dev, GFP_KERNEL);
     if (!buff->page_table_kern) {
         DEBUG("init_dma_buff: page_table_kern");
