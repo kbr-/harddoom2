@@ -2,6 +2,7 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/slab.h>
+#include <linux/kref.h>
 #include <linux/anon_inodes.h>
 
 #include "common.h"
@@ -37,19 +38,19 @@ struct hd2_buffer {
     uint16_t height;
 };
 
-static int hd2_buff_release(struct inode* inode, struct file* file) {
-    DEBUG("hd2_buff_release");
-
-    struct hd2_buffer* buff = file->private_data;
-    kref_put(&buff->kref);
-
-    return 0;
-}
-
 static void do_hd2_buff_release(struct kref* kref) {
     struct hd2_buffer* buff = container_of(kref, struct hd2_buffer, kref);
     free_dma_buff(&buff->dma_buff);
     kfree(buff);
+}
+
+static int hd2_buff_release(struct inode* inode, struct file* file) {
+    DEBUG("hd2_buff_release");
+
+    struct hd2_buffer* buff = file->private_data;
+    kref_put(&buff->kref, do_hd2_buff_release);
+
+    return 0;
 }
 
 static ssize_t hd2_buff_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
@@ -196,8 +197,6 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     }
 
     f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
-    buff->f = f;
-
     fd_install(fd, f);
 
     return fd;
