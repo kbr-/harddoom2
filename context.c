@@ -47,8 +47,8 @@ static struct context* get_ctx(struct file* file) {
 }
 
 static int context_open(struct inode* inode, struct file* file) {
-    int number = MINOR(inode->i_rdev);
-    if (number < 0 || number >= 256) { ERROR("context_open: minor not in range"); return -EINVAL; }
+    unsigned number = MINOR(inode->i_rdev);
+    BUG_ON(number >= 256);
 
     struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {
@@ -174,35 +174,34 @@ static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
     return -ENOTTY;
 }
 
-static int validate_maps(struct context* ctx, uint8_t flags, uint16_t colormap_idx, uint16_t translation_idx) {
+static bool validate_maps(struct context* ctx, uint8_t flags, uint16_t colormap_idx, uint16_t translation_idx) {
     if (flags & DOOMDEV2_CMD_FLAGS_TRANSLATE && !ctx->curr_bufs[TRANSLATE_BUF_IDX]) {
         DEBUG("draw_column: translate flag set but no buf");
-        return -EINVAL;
+        return false;
     }
     if (flags & DOOMDEV2_CMD_FLAGS_COLORMAP && !ctx->curr_bufs[COLORMAP_BUF_IDX]) {
         DEBUG("draw_column: colormap flag set but no buf");
-        return -EINVAL;
+        return false;
     }
     if (flags & DOOMDEV2_CMD_FLAGS_TRANMAP && !ctx->curr_bufs[TRANMAP_BUF_IDX]) {
         DEBUG("draw_column: tranmap flag set but no buf");
-        return -EINVAL;
+        return false;
     }
     if (flags & DOOMDEV2_CMD_FLAGS_TRANSLATE
             && translation_idx >= (get_buff_size(ctx->curr_bufs[TRANSLATE_BUF_IDX]) >> 8)) {
         DEBUG("draw_column: translation idx out of bounds");
-        return -EINVAL;
+        return false;
     }
     if (flags & DOOMDEV2_CMD_FLAGS_COLORMAP
             && colormap_idx >= (get_buff_size(ctx->curr_bufs[COLORMAP_BUF_IDX]) >> 8)) {
         DEBUG("draw_column: colormap idx out of bounds");
-        return -EINVAL;
+        return false;
     }
-    return 0;
+    return true;
 }
 
-static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd) {
+static bool validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd) {
     BUG_ON(!ctx->curr_bufs[DST_BUF_IDX]);
-    int err;
 
     struct hd2_buffer* dst_buff = ctx->curr_bufs[DST_BUF_IDX];
     uint16_t surf_width = get_buff_width(dst_buff), surf_height = get_buff_height(dst_buff);
@@ -215,7 +214,7 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
     case DOOMDEV2_CMD_TYPE_COPY_RECT: {
         if (!ctx->curr_bufs[SRC_BUF_IDX]) {
             DEBUG("copy rect: no src buf");
-            return -EINVAL;
+            return false;
         }
 
         const struct doomdev2_cmd_copy_rect* cmd = &user_cmd->copy_rect;
@@ -224,124 +223,124 @@ static int validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cmd
                 (uint32_t)cmd->pos_src_x + cmd->width > surf_width ||
                 (uint32_t)cmd->pos_src_y + cmd->height > surf_height) {
             DEBUG("copy_rect: out of bounds");
-            return -EINVAL;
+            return false;
         }
 
         if (ctx->curr_bufs[DST_BUF_IDX] == ctx->curr_bufs[SRC_BUF_IDX] &&
                cmd->pos_dst_x < cmd->pos_src_x + cmd->width && cmd->pos_dst_x + cmd->width > cmd->pos_src_x &&
                cmd->pos_dst_y < cmd->pos_src_y + cmd->height && cmd->pos_dst_y + cmd->height > cmd->pos_src_y) {
             DEBUG("copy_rect: intersection");
-            return -EINVAL;
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_FILL_RECT: {
         const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
         if ((uint32_t)cmd->pos_x + cmd->width > surf_width || (uint32_t)cmd->pos_y + cmd->height > surf_height) {
             DEBUG("fill_rect: out of bounds");
-            return -EINVAL;
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
         const struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
         if (cmd->pos_a_x >= surf_width || cmd->pos_a_y >= surf_height
                 || cmd->pos_b_x >= surf_width || cmd->pos_b_y >= surf_height) {
             DEBUG("draw_line: out of bounds");
-            return -EINVAL;
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_BACKGROUND: {
         if (!ctx->curr_bufs[FLAT_BUF_IDX]) {
             DEBUG("draw background: no flat buf");
-            return -EINVAL;
+            return false;
         }
 
         const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
         if ((uint32_t)cmd->pos_x + cmd->width > surf_width || (uint32_t)cmd->pos_y + cmd->height > surf_height) {
             DEBUG("draw background: out of bounds");
-            return -EINVAL;
+            return false;
         }
         if (cmd->flat_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
             DEBUG("draw background: flat idx out of bounds");
-            return -EINVAL;
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
         if (!ctx->curr_bufs[TEXTURE_BUF_IDX]) {
             DEBUG("draw_column: no texture buffer");
-            return -EINVAL;
+            return false;
         }
 
         const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
         if (cmd->pos_x >= surf_width || cmd->pos_b_y >= surf_height) {
             DEBUG("draw_column: out of bounds");
-            return -EINVAL;
+            return false;
         }
         if (cmd->pos_b_y < cmd->pos_a_y) {
             DEBUG("draw_column: b_y < a_y");
-            return -EINVAL;
+            return false;
         }
-        if ((err = validate_maps(ctx, cmd->flags, cmd->colormap_idx, cmd->translation_idx))) {
-            return err;
+        if (!validate_maps(ctx, cmd->flags, cmd->colormap_idx, cmd->translation_idx)) {
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
         if (!ctx->curr_bufs[FLAT_BUF_IDX]) {
             DEBUG("draw span: no flat buffer");
-            return -EINVAL;
+            return false;
         }
 
         const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
         if (cmd->pos_y >= surf_height || cmd->pos_b_x >= surf_width) {
             DEBUG("draw span: out of bounds");
-            return -EINVAL;
+            return false;
         }
         if (cmd->pos_b_x < cmd->pos_a_x) {
             DEBUG("draw span: b_x < a_x");
-            return -EINVAL;
+            return false;
         }
         if (cmd->flat_idx >= (get_buff_size(ctx->curr_bufs[FLAT_BUF_IDX]) >> 12)) {
             DEBUG("draw span: flat idx out of bounds");
-            return -EINVAL;
+            return false;
         }
-        if ((err = validate_maps(ctx, cmd->flags, cmd->colormap_idx, cmd->translation_idx))) {
-            return err;
+        if (!validate_maps(ctx, cmd->flags, cmd->colormap_idx, cmd->translation_idx)) {
+            return false;
         }
-        return 0;
+        return true;
     }
     case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
         if (!ctx->curr_bufs[COLORMAP_BUF_IDX]) {
             DEBUG("draw fuzz: no colormap");
-            return -EINVAL;
+            return false;
         }
 
         const struct doomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
         if (cmd->pos_x >= surf_width || cmd->fuzz_end >= surf_height) {
             DEBUG("draw fuzz: out of bounds");
-            return -EINVAL;
+            return false;
         }
         if (cmd->fuzz_start > cmd->pos_a_y || cmd->pos_a_y > cmd->pos_b_y || cmd->pos_b_y > cmd->fuzz_end) {
             DEBUG("draw fuzz: inequalities");
-            return -EINVAL;
+            return false;
         }
         if (cmd->colormap_idx >= (get_buff_size(ctx->curr_bufs[COLORMAP_BUF_IDX]) >> 8)) {
             DEBUG("draw fuzz: colormap idx out of bounds");
-            return -EINVAL;
+            return false;
         }
         if (cmd->fuzz_pos > 55) {
             DEBUG("draw fuzz: fuzz_pos > 55");
-            return -EINVAL;
+            return false;
         }
-        return 0;
+        return true;
     }
     }
 
     DEBUG("unknown cmd type: %u", user_cmd->type);
-    return -EINVAL;
+    return false;
 }
 
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
@@ -384,7 +383,8 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
     size_t it;
     for (it = 0; it < num_cmds; ++it) {
-        if ((err = validate_cmd(ctx, &cmds[it]))) {
+        if (!validate_cmd(ctx, &cmds[it])) {
+            err = -EINVAL;
             break;
         }
     }

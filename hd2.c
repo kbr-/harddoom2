@@ -505,7 +505,6 @@ int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create
     }
 
     size_t size = params.width * params.height;
-    if (size > MAX_BUFFER_SIZE) { ERROR("create surface size"); return -EINVAL; }
 
     return new_hd2_buffer(hd2, size, params.width, params.height);
 }
@@ -783,30 +782,22 @@ static void pci_remove(struct pci_dev* pdev) {
     struct harddoom2* hd2 = pci_get_drvdata(pdev);
     void __iomem* bar = NULL;
 
-    if (!hd2) {
-        ERROR("pci_remove: no pcidata!");
-    } else {
-        BUG_ON(hd2->number >= DEVICES_LIMIT);
-        BUG_ON(&devices[hd2->number] != hd2);
+    BUG_ON(!hd2);
+    BUG_ON(hd2->number >= DEVICES_LIMIT);
+    BUG_ON(&devices[hd2->number] != hd2);
 
-        bar = hd2->bar;
+    bar = hd2->bar;
 
-        device_destroy(&doom_class, doom_major + hd2->number);
-        cdev_del(&hd2->cdev);
-        device_off(bar);
-        free_irq(pdev->irq, hd2);
-        pci_set_drvdata(pdev, NULL);
-        free_buffers(hd2);
-    }
+    device_destroy(&doom_class, doom_major + hd2->number);
+    cdev_del(&hd2->cdev);
+    device_off(bar);
+    free_irq(pdev->irq, hd2);
+    pci_set_drvdata(pdev, NULL);
+    free_buffers(hd2);
 
     free_dev_number(hd2->number);
     pci_clear_master(pdev);
-
-    if (!bar) {
-        ERROR("pci_remove: no bar!");
-    } else {
-        pci_iounmap(pdev, bar);
-    }
+    pci_iounmap(pdev, bar);
 
     pci_release_regions(pdev);
     pci_disable_device(pdev);
@@ -857,7 +848,7 @@ static int hd2_init(void)
 {
     int err;
 
-	DEBUG("Init");
+	DEBUG("module init");
     if ((err = alloc_chrdev_region(&doom_major, 0, DEVICES_LIMIT, DRV_NAME))) {
         DEBUG("failed to alloc chrdev region");
         return err;
@@ -884,7 +875,7 @@ out_class:
 
 static void hd2_cleanup(void)
 {
-	DEBUG("Cleanup");
+	DEBUG("module cleanup");
     pci_unregister_driver(&pci_drv);
     class_unregister(&doom_class);
     unregister_chrdev_region(doom_major, DEVICES_LIMIT);
