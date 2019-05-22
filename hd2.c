@@ -27,8 +27,10 @@ MODULE_LICENSE("GPL");
 /* 4M */
 #define MAX_BUFFER_SIZE (MAX_BUFFER_PAGES * HARDDOOM2_PAGE_SIZE)
 
+#define CMD_BUF_SIZE MAX_BUFFER_SIZE
+
 /* 128K commands */
-#define CMD_BUF_LEN (MAX_BUFFER_SIZE / CMD_SEND_BYTES)
+#define CMD_BUF_LEN (CMD_BUF_SIZE / CMD_SEND_BYTES)
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },
@@ -714,7 +716,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     hd2->bar = bar;
     hd2->pdev = pdev;
 
-    if ((err = init_dma_buff(&hd2->cmd_buff, MAX_BUFFER_SIZE, &pdev->dev))) {
+    if ((err = init_dma_buff(&hd2->cmd_buff, CMD_BUF_SIZE, &pdev->dev))) {
         DEBUG("can't init cmd_buff");
         goto out_cmd_buff;
     }
