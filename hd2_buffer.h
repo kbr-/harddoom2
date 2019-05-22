@@ -27,10 +27,10 @@ size_t get_buff_size(const struct hd2_buffer*);
 
 dma_addr_t get_page_table(struct hd2_buffer*);
 
-counter get_last_use(const struct hd2_buffer*);
+counter get_last_use(struct hd2_buffer*);
 void set_last_use(struct hd2_buffer*, counter cnt);
 
-counter get_last_write(const struct hd2_buffer*);
+counter get_last_write(struct hd2_buffer*);
 void set_last_write(struct hd2_buffer*, counter cnt);
 
 bool interlocked(const struct hd2_buffer*);

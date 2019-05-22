@@ -379,7 +379,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     if (!ctx->curr_bufs[DST_BUF_IDX]) {
         DEBUG("write: no dst surface set");
         err = -EINVAL;
-        goto out_copy;
+        goto out_surf;
     }
 
     size_t it;
@@ -392,7 +392,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
     if (!it) {
         /* The first command was invalid, return error */
         DEBUG("write: first command invalid");
-        goto out_copy;
+        goto out_surf;
     }
 
     num_cmds = it;
@@ -402,8 +402,9 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         err *= sizeof(struct doomdev2_cmd);
     }
 
-out_copy:
+out_surf:
     mutex_unlock(&ctx->mut);
+out_copy:
     kfree(buf);
     return err;
 }

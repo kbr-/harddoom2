@@ -95,6 +95,439 @@ struct harddoom2* get_hd2(unsigned num) {
     return &devices[num];
 }
 
+struct cmd {
+    uint32_t data[HARDDOOM2_CMD_SEND_SIZE];
+};
+
+_Static_assert(sizeof(struct cmd) == 32, "struct cmd size");
+
+static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
+    switch (user_cmd->type) {
+    case DOOMDEV2_CMD_TYPE_COPY_RECT: {
+        if (!interlocked(hd2->curr_bufs[SRC_BUF_IDX])) {
+            extra_flags |= HARDDOOM2_CMD_FLAG_INTERLOCK;
+            interlock(hd2->curr_bufs[SRC_BUF_IDX]);
+        }
+
+        const struct doomdev2_cmd_copy_rect* cmd = &user_cmd->copy_rect;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_COPY_RECT, extra_flags),
+            0,
+            HARDDOOM2_CMD_W3(cmd->pos_dst_x, cmd->pos_dst_y),
+            HARDDOOM2_CMD_W3(cmd->pos_src_x, cmd->pos_src_y),
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, 0),
+            0
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_FILL_RECT: {
+        const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
+            0,
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_y),
+            0,
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, cmd->fill_color),
+            0
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
+        const struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_LINE, extra_flags),
+            0,
+            HARDDOOM2_CMD_W3(cmd->pos_a_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_b_y),
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(0, 0, cmd->fill_color),
+            0
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_BACKGROUND: {
+        const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_BACKGROUND, extra_flags),
+            0,
+            HARDDOOM2_CMD_W2(cmd->pos_x, cmd->pos_y, cmd->flat_idx),
+            0,
+            0,
+            0,
+            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, 0),
+            0
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
+        const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_COLUMN, extra_flags),
+            HARDDOOM2_CMD_W1(
+                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
+                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
+            cmd->ustart,
+            cmd->ustep,
+            HARDDOOM2_CMD_W6_B(cmd->texture_offset),
+            HARDDOOM2_CMD_W7_B((get_buff_size(hd2->curr_bufs[TEXTURE_BUF_IDX]) - 1) >> 6, cmd->texture_height)
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
+        const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
+        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_SPAN, extra_flags),
+            HARDDOOM2_CMD_W1(
+                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
+                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
+            HARDDOOM2_CMD_W2(cmd->pos_a_x, cmd->pos_y, cmd->flat_idx),
+            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_y),
+            cmd->ustart,
+            cmd->ustep,
+            cmd->vstart,
+            cmd->vstep
+        }};
+    }
+    case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
+        const struct doomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
+        return (struct cmd){ .data = {
+            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_FUZZ, extra_flags),
+            HARDDOOM2_CMD_W1(0, cmd->colormap_idx),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
+            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
+            0,
+            0,
+            HARDDOOM2_CMD_W6_C(cmd->fuzz_start, cmd->fuzz_end, cmd->fuzz_pos),
+            0
+        }};
+    }
+    }
+
+    BUG();
+}
+
+static struct cmd make_setup(struct hd2_buffer* bufs[NUM_USER_BUFS], uint32_t extra_flags) {
+    static const uint32_t bufs_flags[NUM_USER_BUFS] = {
+        HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
+        HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT,
+        HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
+
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i]) {
+            extra_flags |= bufs_flags[i];
+        }
+    }
+
+    uint16_t dst_width = bufs[0] ? get_buff_width(bufs[0]) : 0;
+    uint16_t src_width = bufs[1] ? get_buff_width(bufs[1]) : 0;
+    BUG_ON(dst_width && src_width && dst_width != src_width);
+
+    struct cmd cmd;
+    cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        cmd.data[i+1] = bufs[i] ? (get_page_table(bufs[i]) >> 8) : 0;
+    }
+
+    return cmd;
+}
+
+static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
+    struct dma_buffer* buff = &hd2->cmd_buff;
+    BUG_ON(write_idx >= CMD_BUF_LEN);
+    BUG_ON(buff->size != CMD_BUF_LEN * CMD_SEND_BYTES);
+
+    size_t dst_pos = write_idx * CMD_SEND_BYTES;
+    return write_dma_buff(buff, cmd->data, dst_pos, CMD_SEND_BYTES);
+}
+
+static int update_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS]) {
+    int has_change = 0;
+    int is_diff = 0;
+
+    int i;
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i] != hd2->curr_bufs[i]) {
+            is_diff = 1;
+            if (hd2->curr_bufs[i]) {
+                has_change = 1;
+                break;
+            }
+        }
+    }
+
+    if (!is_diff) {
+        return 0;
+    }
+
+    struct buffer_change* change = NULL;
+    if (has_change) {
+        change = kzalloc(sizeof(struct buffer_change), GFP_KERNEL);
+        if (!change) {
+            return -ENOMEM;
+        }
+
+        change->batch_cnt = hd2->batch_cnt;
+        list_add_tail(&change->list, &hd2->changes_queue);
+    }
+
+    for (i = 0; i < NUM_USER_BUFS; ++i) {
+        if (bufs[i] == hd2->curr_bufs[i]) continue;
+
+        if (bufs[i]) {
+            hd2_buff_get(bufs[i]);
+        }
+        if (hd2->curr_bufs[i]) {
+            BUG_ON(!change);
+            change->bufs[i] = hd2->curr_bufs[i];
+        }
+        hd2->curr_bufs[i] = bufs[i];
+    }
+
+    return 1;
+}
+
+static void _update_last_fence_cnt(struct harddoom2* hd2) {
+    uint32_t curr_lower = ioread32(hd2->bar + HARDDOOM2_FENCE_COUNTER);
+    uint32_t last_lower = cnt_lower(hd2->last_fence_cnt);
+
+    uint32_t upper = cnt_upper(hd2->last_fence_cnt);
+    if (last_lower > curr_lower) {
+        ++upper;
+    }
+    hd2->last_fence_cnt = make_cnt(upper, curr_lower);
+}
+
+static void bump_fence_wait(struct harddoom2* hd2, counter cnt) {
+    spin_lock(&hd2->fence_wait_lock);
+    if (cnt < hd2->last_fence_wait) {
+        goto out;
+    }
+
+    iowrite32(cnt_lower(cnt), hd2->bar + HARDDOOM2_FENCE_WAIT);
+    hd2->last_fence_wait = cnt;
+
+out:
+    spin_unlock(&hd2->fence_wait_lock);
+}
+
+static counter get_curr_fence_cnt(struct harddoom2* hd2) {
+    counter res;
+    spin_lock(&hd2->fence_cnt_lock);
+    _update_last_fence_cnt(hd2);
+    res = hd2->last_fence_cnt;
+    spin_unlock(&hd2->fence_cnt_lock);
+    return res;
+}
+
+void wait_for_fence_cnt(struct harddoom2* hd2, counter cnt) {
+    if (get_curr_fence_cnt(hd2) >= cnt) {
+        return;
+    }
+
+    bump_fence_wait(hd2, cnt);
+    if (get_curr_fence_cnt(hd2) >= cnt) {
+        return;
+    }
+
+    DEBUG("wait for fence: %llu", cnt);
+
+    wait_event(hd2->fence_wq, get_curr_fence_cnt(hd2) >= cnt);
+
+    DEBUG("wait for fence: %llu finished", cnt);
+}
+
+static void update_last_fence_cnt(struct harddoom2* hd2) {
+    spin_lock(&hd2->fence_cnt_lock);
+    _update_last_fence_cnt(hd2);
+    spin_unlock(&hd2->fence_cnt_lock);
+}
+
+static void collect_buffers(struct harddoom2* hd2) {
+    counter cnt = get_curr_fence_cnt(hd2);
+    while (!list_empty(&hd2->changes_queue)) {
+        struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
+
+        if (cnt < change->batch_cnt) {
+            return;
+        }
+
+        release_user_bufs(change->bufs);
+
+        list_del(&change->list);
+        kfree(change);
+    }
+}
+
+static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
+    spin_lock(&hd2->write_idx_lock);
+    uint32_t ret = ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1;
+    spin_unlock(&hd2->write_idx_lock);
+    return ret;
+}
+
+static void _enable_intr(struct harddoom2* hd2, uint32_t intr) {
+    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
+}
+
+static void _disable_intr(struct harddoom2* hd2, uint32_t intr) {
+    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
+}
+
+static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
+    unsigned long flags;
+    spin_lock_irqsave(&hd2->intr_flags_lock, flags);
+    iowrite32(intr, hd2->bar + HARDDOOM2_INTR);
+    spin_unlock_irqrestore(&hd2->intr_flags_lock, flags);
+}
+
+ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS],
+        const struct doomdev2_cmd* cmds, size_t num_cmds) {
+    update_last_fence_cnt(hd2);
+
+    mutex_lock(&hd2->cmd_buff_lock);
+    while (get_cmd_buf_space(hd2) < 2) {
+        deactivate_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
+        if (get_cmd_buf_space(hd2) >= 2) {
+            break;
+        }
+        _enable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
+        mutex_unlock(&hd2->cmd_buff_lock);
+
+        wait_event(hd2->write_wq, get_cmd_buf_space(hd2) >= 2);
+
+        mutex_lock(&hd2->cmd_buff_lock);
+    }
+
+    _disable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
+    /* If anyone was waiting on the event queue, let them enable the interrupt again. */
+    wake_up_all(&hd2->write_wq);
+
+    uint32_t space = get_cmd_buf_space(hd2);
+
+    spin_lock(&hd2->write_idx_lock);
+    uint32_t write_idx = ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    spin_unlock(&hd2->write_idx_lock);
+
+    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
+
+    int set = update_buffers(hd2, bufs);
+    if (set < 0) {
+        DEBUG("write: could not setup");
+        goto out_setup;
+    } else if (set) {
+        struct cmd dev_cmd = make_setup(hd2->curr_bufs, extra_flags);
+        write_cmd(hd2, &dev_cmd, write_idx);
+
+        write_idx = (write_idx + 1) % CMD_BUF_LEN;
+        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
+        --space;
+    }
+
+    if (num_cmds > space) {
+        num_cmds = space;
+    }
+
+    BUG_ON(!num_cmds);
+
+    for (size_t it = 0; it < num_cmds - 1; ++it) {
+        struct cmd dev_cmd = make_cmd(hd2, &cmds[it], extra_flags);
+        write_cmd(hd2, &dev_cmd, write_idx);
+
+        write_idx = (write_idx + 1) % CMD_BUF_LEN;
+        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
+    }
+
+    extra_flags |= HARDDOOM2_CMD_FLAG_FENCE;
+    struct cmd dev_cmd = make_cmd(hd2, &cmds[num_cmds - 1], extra_flags);
+    write_cmd(hd2, &dev_cmd, write_idx);
+
+    write_idx = (write_idx + 1) % CMD_BUF_LEN;
+    ++hd2->batch_cnt;
+
+    spin_lock(&hd2->write_idx_lock);
+    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    spin_unlock(&hd2->write_idx_lock);
+
+    set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
+
+    /* 'last use' is needed by the driver to wait until commands using this buffer finish
+       when the user wants to write to this buffer. Since the user doesn't do that very often,
+       we don't care to set last use on specific buffers only - we set it on all installed buffers. */
+    for (int i = 0; i < NUM_USER_BUFS; ++i) {
+        if (hd2->curr_bufs[i]) {
+            set_last_use(hd2->curr_bufs[i], hd2->batch_cnt);
+        }
+    }
+
+    /* TODO do this outside lock? */
+    collect_buffers(hd2);
+
+    mutex_unlock(&hd2->cmd_buff_lock);
+
+    return num_cmds;
+
+out_setup:
+    mutex_unlock(&hd2->cmd_buff_lock);
+    return set;
+}
+
+int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create_surface __user* _params) {
+    DEBUG("harddoom2 create surface");
+
+    struct doomdev2_ioctl_create_surface params;
+    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
+        DEBUG("create surface copy_from_user fail");
+        return -EFAULT;
+    }
+
+    DEBUG("create_surface: %u, %u", (unsigned)params.width, (unsigned)params.height);
+    if (params.width < 64 || !params.height || params.width % 64) {
+        return -EINVAL;
+    }
+
+    if (params.width > 2048 || params.height > 2048) {
+        return -EOVERFLOW;
+    }
+
+    size_t size = params.width * params.height;
+    if (size > MAX_BUFFER_SIZE) { ERROR("create surface size"); return -EINVAL; }
+
+    return new_hd2_buffer(hd2, size, params.width, params.height);
+}
+
+int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_buffer __user* _params) {
+    DEBUG("harddoom2 create buffer");
+
+    struct doomdev2_ioctl_create_buffer params;
+    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_buffer))) {
+        DEBUG("create_buffer copy_from_user fail");
+        return -EFAULT;
+    }
+
+    DEBUG("create_buffer: %u", params.size);
+    if (!params.size) {
+        return -EINVAL;
+    }
+    if (params.size > MAX_BUFFER_SIZE) {
+        return -EOVERFLOW;
+    }
+
+    return new_hd2_buffer(hd2, params.size, 0, 0);
+}
+
+int harddoom2_init_dma_buff(struct harddoom2* hd2, struct dma_buffer* buff, size_t size) {
+    return init_dma_buff(buff, size, &hd2->pdev->dev);
+}
+
 static int dev_counter = 0;
 // static DEFINE_MUTEX(dev_counter_mut);
 
@@ -389,7 +822,7 @@ static int pci_resume(struct pci_dev* pdev) {
     return 0;
 }
 
-static void pci_shutdown(struct pci_dev* dev) {
+static void pci_shutdown(struct pci_dev* pdev) {
     DEBUG("shutdown");
     struct harddoom2* hd2 = pci_get_drvdata(pdev);
     device_off(hd2->bar);
@@ -444,436 +877,3 @@ static void hd2_cleanup(void)
 
 module_init(hd2_init);
 module_exit(hd2_cleanup);
-
-struct cmd {
-    uint32_t data[HARDDOOM2_CMD_SEND_SIZE];
-};
-
-_Static_assert(sizeof(struct cmd) == 32, "struct cmd size");
-
-static struct cmd make_cmd(const struct harddoom2* hd2, const struct doomdev2_cmd* user_cmd, uint32_t extra_flags) {
-    switch (user_cmd->type) {
-    case DOOMDEV2_CMD_TYPE_COPY_RECT: {
-        if (!interlocked(hd2->curr_bufs[SRC_BUF_IDX])) {
-            extra_flags |= HARDDOOM2_CMD_FLAG_INTERLOCK;
-            interlock(hd2->curr_bufs[SRC_BUF_IDX]);
-        }
-
-        const struct doomdev2_cmd_copy_rect* cmd = &user_cmd->copy_rect;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_COPY_RECT, extra_flags),
-            0,
-            HARDDOOM2_CMD_W3(cmd->pos_dst_x, cmd->pos_dst_y),
-            HARDDOOM2_CMD_W3(cmd->pos_src_x, cmd->pos_src_y),
-            0,
-            0,
-            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, 0),
-            0
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_FILL_RECT: {
-        const struct doomdev2_cmd_fill_rect* cmd = &user_cmd->fill_rect;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_FILL_RECT, extra_flags),
-            0,
-            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_y),
-            0,
-            0,
-            0,
-            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, cmd->fill_color),
-            0
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_DRAW_LINE: {
-        const struct doomdev2_cmd_draw_line* cmd = &user_cmd->draw_line;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_LINE, extra_flags),
-            0,
-            HARDDOOM2_CMD_W3(cmd->pos_a_x, cmd->pos_a_y),
-            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_b_y),
-            0,
-            0,
-            HARDDOOM2_CMD_W6_A(0, 0, cmd->fill_color),
-            0
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_DRAW_BACKGROUND: {
-        const struct doomdev2_cmd_draw_background* cmd = &user_cmd->draw_background;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_BACKGROUND, extra_flags),
-            0,
-            HARDDOOM2_CMD_W2(cmd->pos_x, cmd->pos_y, cmd->flat_idx),
-            0,
-            0,
-            0,
-            HARDDOOM2_CMD_W6_A(cmd->width, cmd->height, 0),
-            0
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_DRAW_COLUMN: {
-        const struct doomdev2_cmd_draw_column* cmd = &user_cmd->draw_column;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_COLUMN, extra_flags),
-            HARDDOOM2_CMD_W1(
-                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
-                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
-            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
-            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
-            cmd->ustart,
-            cmd->ustep,
-            HARDDOOM2_CMD_W6_B(cmd->texture_offset),
-            HARDDOOM2_CMD_W7_B((get_buff_size(hd2->curr_bufs[TEXTURE_BUF_IDX]) - 1) >> 6, cmd->texture_height)
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_DRAW_SPAN: {
-        const struct doomdev2_cmd_draw_span* cmd = &user_cmd->draw_span;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE) extra_flags |= HARDDOOM2_CMD_FLAG_TRANSLATION;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP) extra_flags |= HARDDOOM2_CMD_FLAG_COLORMAP;
-        if (cmd->flags & DOOMDEV2_CMD_FLAGS_TRANMAP) extra_flags |= HARDDOOM2_CMD_FLAG_TRANMAP;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_SPAN, extra_flags),
-            HARDDOOM2_CMD_W1(
-                cmd->flags & DOOMDEV2_CMD_FLAGS_TRANSLATE ? cmd->translation_idx : 0,
-                cmd->flags & DOOMDEV2_CMD_FLAGS_COLORMAP ? cmd->colormap_idx : 0),
-            HARDDOOM2_CMD_W2(cmd->pos_a_x, cmd->pos_y, cmd->flat_idx),
-            HARDDOOM2_CMD_W3(cmd->pos_b_x, cmd->pos_y),
-            cmd->ustart,
-            cmd->ustep,
-            cmd->vstart,
-            cmd->vstep
-        }};
-    }
-    case DOOMDEV2_CMD_TYPE_DRAW_FUZZ: {
-        const struct doomdev2_cmd_draw_fuzz* cmd = &user_cmd->draw_fuzz;
-        return (struct cmd){ .data = {
-            HARDDOOM2_CMD_W0(HARDDOOM2_CMD_TYPE_DRAW_FUZZ, extra_flags),
-            HARDDOOM2_CMD_W1(0, cmd->colormap_idx),
-            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_a_y),
-            HARDDOOM2_CMD_W3(cmd->pos_x, cmd->pos_b_y),
-            0,
-            0,
-            HARDDOOM2_CMD_W6_C(cmd->fuzz_start, cmd->fuzz_end, cmd->fuzz_pos),
-            0
-        }};
-    }
-    }
-
-    BUG();
-}
-
-static struct cmd make_setup(struct hd2_buffer* bufs[NUM_USER_BUFS], uint32_t extra_flags) {
-    static const uint32_t bufs_flags[NUM_USER_BUFS] = {
-        HARDDOOM2_CMD_FLAG_SETUP_SURF_DST, HARDDOOM2_CMD_FLAG_SETUP_SURF_SRC,
-        HARDDOOM2_CMD_FLAG_SETUP_TEXTURE, HARDDOOM2_CMD_FLAG_SETUP_FLAT,
-        HARDDOOM2_CMD_FLAG_SETUP_TRANSLATION, HARDDOOM2_CMD_FLAG_SETUP_COLORMAP, HARDDOOM2_CMD_FLAG_SETUP_TRANMAP };
-
-    int i;
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i]) {
-            extra_flags |= bufs_flags[i];
-        }
-    }
-
-    uint16_t dst_width = bufs[0] ? get_buff_width(bufs[0]) : 0;
-    uint16_t src_width = bufs[1] ? get_buff_width(bufs[1]) : 0;
-    BUG_ON(dst_width && src_width && dst_width != src_width);
-
-    struct cmd cmd;
-    cmd.data[0] = HARDDOOM2_CMD_W0_SETUP(HARDDOOM2_CMD_TYPE_SETUP, extra_flags, dst_width, src_width);
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        cmd.data[i+1] = bufs[i] ? (get_page_table(bufs[i]) >> 8) : 0;
-    }
-
-    return cmd;
-}
-
-static void write_cmd(struct harddoom2* hd2, struct cmd* cmd, size_t write_idx) {
-    struct dma_buffer* buff = &hd2->cmd_buff;
-    BUG_ON(write_idx >= CMD_BUF_LEN);
-    BUG_ON(buff->size != CMD_BUF_LEN * CMD_SEND_BYTES);
-
-    size_t dst_pos = write_idx * CMD_SEND_BYTES;
-    return write_dma_buff(buff, cmd->data, dst_pos, CMD_SEND_BYTES);
-}
-
-static int update_buffers(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS]) {
-    int has_change = 0;
-    int is_diff = 0;
-
-    int i;
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i] != hd2->curr_bufs[i]) {
-            is_diff = 1;
-            if (hd2->curr_bufs[i]) {
-                has_change = 1;
-                break;
-            }
-        }
-    }
-
-    if (!is_diff) {
-        return 0;
-    }
-
-    struct buffer_change* change = NULL;
-    if (has_change) {
-        change = kzalloc(sizeof(struct buffer_change), GFP_KERNEL);
-        if (!change) {
-            return -ENOMEM;
-        }
-
-        change->batch_cnt = hd2->batch_cnt;
-        list_add_tail(&change->list, &hd2->changes_queue);
-    }
-
-    for (i = 0; i < NUM_USER_BUFS; ++i) {
-        if (bufs[i] == hd2->curr_bufs[i]) continue;
-
-        if (bufs[i]) {
-            hd2_buff_get(bufs[i]);
-        }
-        if (hd2->curr_bufs[i]) {
-            BUG_ON(!change);
-            change->bufs[i] = hd2->curr_bufs[i];
-        }
-        hd2->curr_bufs[i] = bufs[i];
-    }
-
-    return 1;
-}
-
-static void _update_last_fence_cnt(struct harddoom2* hd2) {
-    uint32_t curr_lower = ioread32(hd2->bar + HARDDOOM2_FENCE_COUNTER);
-    uint32_t last_lower = cnt_lower(hd2->last_fence_cnt);
-
-    uint32_t upper = cnt_upper(hd2->last_fence_cnt);
-    if (last_lower > curr_lower) {
-        ++upper;
-    }
-    hd2->last_fence_cnt = make_cnt(upper, curr_lower);
-}
-
-static void bump_fence_wait(struct harddoom2* hd2, counter cnt) {
-    spin_lock(&hd2->fence_wait_lock);
-    if (cnt < hd2->last_fence_wait) {
-        goto out;
-    }
-
-    iowrite32(cnt_lower(cnt), hd2->bar + HARDDOOM2_FENCE_WAIT);
-    hd2->last_fence_wait = cnt;
-
-out:
-    spin_unlock(&hd2->fence_wait_lock);
-}
-
-static counter get_curr_fence_cnt(struct harddoom2* hd2) {
-    counter res;
-    spin_lock(&hd2->fence_cnt_lock);
-    _update_last_fence_cnt(hd2);
-    res = hd2->last_fence_cnt;
-    spin_unlock(&hd2->fence_cnt_lock);
-    return res;
-}
-
-void wait_for_fence_cnt(struct harddoom2* hd2, counter cnt) {
-    if (get_curr_fence_cnt(hd2) >= cnt) {
-        return;
-    }
-
-    bump_fence_wait(hd2, cnt);
-    if (get_curr_fence_cnt(hd2) >= cnt) {
-        return;
-    }
-
-    DEBUG("wait for fence: %llu", cnt.val);
-
-    wait_event(hd2->fence_wq, get_curr_fence_cnt(hd2) >= cnt);
-
-    DEBUG("wait for fence: %llu finished", cnt.val);
-}
-
-static void update_last_fence_cnt(struct harddoom2* hd2) {
-    spin_lock(&hd2->fence_cnt_lock);
-    _update_last_fence_cnt(hd2);
-    spin_unlock(&hd2->fence_cnt_lock);
-}
-
-static void collect_buffers(struct harddoom2* hd2) {
-    counter cnt = get_curr_fence_cnt(hd2);
-    while (!list_empty(&hd2->changes_queue)) {
-        struct buffer_change* change = list_first_entry(&hd2->changes_queue, struct buffer_change, list);
-
-        if (cnt < change->batch_cnt) {
-            return;
-        }
-
-        release_user_bufs(change->bufs);
-
-        list_del(&change->list);
-        kfree(change);
-    }
-}
-
-static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
-    spin_lock(&hd2->write_idx_lock);
-    uint32_t ret = ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1;
-    spin_unlock(&hd2->write_idx_lock);
-    return ret;
-}
-
-static void _enable_intr(struct harddoom2* hd2, uint32_t intr) {
-    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
-}
-
-static void _disable_intr(struct harddoom2* hd2, uint32_t intr) {
-    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
-}
-
-static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
-    unsigned long flags;`
-    spin_lock_irqsave(&hd2->intr_flags_lock, flags);
-    iowrite32(intr, hd2->bar + HARDDOOM2_INTR);
-    spin_lock_irqrestore(&hd2->intr_flags_lock, flags);
-}
-
-ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS],
-        const struct doomdev2_cmd* cmds, size_t num_cmds) {
-    update_last_fence_cnt(hd2);
-
-    mutex_lock(&hd2->cmd_buff_lock);
-    while (get_cmd_buf_space(hd2) < 2) {
-        deactivate_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
-        if (get_cmd_buf_space(hd2) >= 2) {
-            break;
-        }
-        _enable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
-        mutex_unlock(&hd2->cmd_buff_lock);
-
-        wait_event(hd2->write_wq, get_cmd_buf_space(hd2) >= 2);
-
-        mutex_lock(&hd2->cmd_buff_lock);
-    }
-
-    _disable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
-    /* If anyone was waiting on the event queue, let them enable the interrupt again. */
-    wake_up_all(&hd2->write_wq);
-
-    uint32_t space = get_cmd_buf_space(hd2);
-
-    spin_lock(&hd2->write_idx_lock);
-    uint32_t write_idx = ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
-    spin_unlock(&hd2->write_idx_lock);
-
-    uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
-
-    int set = update_buffers(hd2, bufs);
-    if (set < 0) {
-        DEBUG("write: could not setup");
-        goto out_setup;
-    } else if (set) {
-        struct cmd dev_cmd = make_setup(hd2->curr_bufs, extra_flags);
-        write_cmd(hd2, &dev_cmd, write_idx);
-
-        write_idx = (write_idx + 1) % CMD_BUF_LEN;
-        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
-        --space;
-    }
-
-    if (num_cmds > space) {
-        num_cmds = space;
-    }
-
-    BUG_ON(!num_cmds);
-
-    for (size_t it = 0; it < num_cmds - 1; ++it) {
-        struct cmd dev_cmd = make_cmd(hd2, &cmds[it], extra_flags);
-        write_cmd(hd2, &dev_cmd, write_idx);
-
-        write_idx = (write_idx + 1) % CMD_BUF_LEN;
-        extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
-    }
-
-    extra_flags |= HARDDOOM2_CMD_FLAG_FENCE;
-    struct cmd dev_cmd = make_cmd(hd2, &cmds[num_cmds - 1], extra_flags);
-    write_cmd(hd2, &dev_cmd, write_idx);
-
-    write_idx = (write_idx + 1) % CMD_BUF_LEN;
-    ++hd2->batch_cnt;
-
-    spin_lock(&hd2->write_idx_lock);
-    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
-    spin_unlock(&hd2->write_idx_lock);
-
-    set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
-
-    /* 'last use' is needed by the driver to wait until commands using this buffer finish
-       when the user wants to write to this buffer. Since the user doesn't do that very often,
-       we don't care to set last use on specific buffers only - we set it on all installed buffers. */
-    for (int i = 0; i < NUM_USER_BUFS; ++i) {
-        if (hd2->curr_bufs[i]) {
-            set_last_use(hd2->curr_bufs[i], hd2->batch_cnt);
-        }
-    }
-
-    /* TODO do this outside lock? */
-    collect_buffers(hd2);
-
-    mutex_unlock(&hd2->cmd_buff_lock);
-
-    return num_cmds;
-
-out_setup:
-    mutex_unlock(&hd2->cmd_buff_lock);
-    return set;
-}
-
-int harddoom2_create_surface(struct harddoom2* hd2, struct doomdev2_ioctl_create_surface __user* _params) {
-    DEBUG("harddoom2 create surface");
-
-    struct doomdev2_ioctl_create_surface params;
-    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_surface))) {
-        DEBUG("create surface copy_from_user fail");
-        return -EFAULT;
-    }
-
-    DEBUG("create_surface: %u, %u", (unsigned)params.width, (unsigned)params.height);
-    if (params.width < 64 || !params.height || params.width % 64) {
-        return -EINVAL;
-    }
-
-    if (params.width > 2048 || params.height > 2048) {
-        return -EOVERFLOW;
-    }
-
-    size_t size = params.width * params.height;
-    if (size > MAX_BUFFER_SIZE) { ERROR("create surface size"); return -EINVAL; }
-
-    return new_hd2_buffer(hd2, size, params.width, params.height);
-}
-
-int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_buffer __user* _params) {
-    DEBUG("harddoom2 create buffer");
-
-    struct doomdev2_ioctl_create_buffer params;
-    if (copy_from_user(&params, _params, sizeof(struct doomdev2_ioctl_create_buffer))) {
-        DEBUG("create_buffer copy_from_user fail");
-        return -EFAULT;
-    }
-
-    DEBUG("create_buffer: %u", params.size);
-    if (!params.size) {
-        return -EINVAL;
-    }
-    if (params.size > MAX_BUFFER_SIZE) {
-        return -EOVERFLOW;
-    }
-
-    return new_hd2_buffer(hd2, params.size, 0, 0);
-}
-
-int harddoom2_init_dma_buff(struct harddoom2* hd2, struct dma_buffer* buff, size_t size) {
-    return init_dma_buff(buff, size, &hd2->pdev->dev);
-}

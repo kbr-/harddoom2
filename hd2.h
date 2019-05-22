@@ -24,6 +24,6 @@ int harddoom2_create_buffer(struct harddoom2* hd2, struct doomdev2_ioctl_create_
 ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_BUFS],
         const struct doomdev2_cmd* cmds, size_t num_cmds);
 
-void wait_for_fence_cnt(struct harddoom2* hd2, struct counter cnt);
+void wait_for_fence_cnt(struct harddoom2* hd2, counter cnt);
 
 #endif

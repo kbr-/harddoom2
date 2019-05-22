@@ -231,7 +231,7 @@ dma_addr_t get_page_table(struct hd2_buffer* buff) {
     return buff->dma_buff.page_table_dev;
 }
 
-counter get_last_use(const struct hd2_buffer* buff) {
+counter get_last_use(struct hd2_buffer* buff) {
     counter res;
     spin_lock(&buff->last_use_lock);
     res = buff->last_use;
@@ -246,7 +246,7 @@ void set_last_use(struct hd2_buffer* buff, counter cnt) {
     spin_unlock(&buff->last_use_lock);
 }
 
-counter get_last_write(const struct hd2_buffer* buff) {
+counter get_last_write(struct hd2_buffer* buff) {
     counter res;
     spin_lock(&buff->last_write_lock);
     res = buff->last_write;
