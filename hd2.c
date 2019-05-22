@@ -468,7 +468,6 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
         }
     }
 
-    /* TODO do this outside lock? */
     collect_buffers(hd2);
 
     mutex_unlock(&hd2->cmd_buff_lock);

@@ -15,8 +15,11 @@ struct hd2_buffer {
 
     struct harddoom2* hd2;
 
-    /* An 'opened file' representing this buffer. Invariant: this->f->private_data == this */
-    struct file* f;
+    /* Used to manage the lifetime of this buffer. May be held by:
+       1. the opened file associated with this buffer (once),
+       2. a context (once),
+       3. the device (multiple times). */
+    struct kref kref;
 
     /* When was the buffer last written to/read from by the device? */
     spinlock_t last_use_lock;
@@ -38,17 +41,19 @@ static int hd2_buff_release(struct inode* inode, struct file* file) {
     DEBUG("hd2_buff_release");
 
     struct hd2_buffer* buff = file->private_data;
-    BUG_ON(buff->f != file);
-
-    free_dma_buff(&buff->dma_buff);
-    kfree(buff);
+    kref_put(&buff->kref);
 
     return 0;
 }
 
+static void do_hd2_buff_release(struct kref* kref) {
+    struct hd2_buffer* buff = container_of(kref, struct hd2_buffer, kref);
+    free_dma_buff(&buff->dma_buff);
+    kfree(buff);
+}
+
 static ssize_t hd2_buff_write(struct file* file, const char __user* _buff, size_t count, loff_t* off) {
     struct hd2_buffer* buff = file->private_data;
-    BUG_ON(buff->f != file);
 
     if (*off < 0) {
         return -EINVAL;
@@ -86,7 +91,6 @@ static ssize_t hd2_buff_write(struct file* file, const char __user* _buff, size_
 
 static ssize_t hd2_buff_read(struct file* file, char __user *_buff, size_t count, loff_t* off) {
     struct hd2_buffer* buff = file->private_data;
-    BUG_ON(buff->f != file);
 
     if (*off < 0) {
         return -EINVAL;
@@ -122,7 +126,6 @@ static ssize_t hd2_buff_read(struct file* file, char __user *_buff, size_t count
 
 static loff_t hd2_buff_llseek(struct file* file, loff_t off, int whence) {
     struct hd2_buffer* buff = file->private_data;
-    BUG_ON(buff->f != file);
     BUG_ON(file->f_pos < 0 || file->f_pos > buff->dma_buff.size);
 
     if (whence == SEEK_CUR) {
@@ -171,6 +174,8 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     buff->height = height;
     buff->interlocked = true;
 
+    kref_init(&buff->kref);
+
     spin_lock_init(&buff->last_use_lock);
     spin_lock_init(&buff->last_write_lock);
 
@@ -194,7 +199,6 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
     buff->f = f;
 
     fd_install(fd, f);
-    /* TODO: need to do anything else? */
 
     return fd;
 
@@ -284,17 +288,18 @@ struct hd2_buffer* hd2_buff_fd_get(int fd) {
     }
 
     struct hd2_buffer* buff = f->private_data;
-    BUG_ON(buff->f != f);
+    kref_get(&buff->kref);
+    fput(f);
 
     return buff;
 }
 
 void hd2_buff_get(struct hd2_buffer* buff) {
-    get_file(buff->f);
+    kref_get(&buff->kref);
 }
 
 void hd2_buff_put(struct hd2_buffer* buff) {
-    if (buff) fput(buff->f);
+    if (buff) kref_put(&buff->kref, do_hd2_buff_release);
 }
 
 void release_user_bufs(struct hd2_buffer* bufs[NUM_USER_BUFS]) {
