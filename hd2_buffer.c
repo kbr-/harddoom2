@@ -190,7 +190,7 @@ int new_hd2_buffer(struct harddoom2* hd2, size_t size, uint16_t width, uint16_t 
         goto out_getfd;
     }
 
-    struct file* f = anon_inode_getfile("[harddoom2]", &hd2_buff_ops, buff, flags);
+    struct file* f = anon_inode_getfile(DRV_NAME, &hd2_buff_ops, buff, flags);
     if (IS_ERR(f)) {
         DEBUG("new_hd2_buffer: getfile");
         err = PTR_ERR(f);
