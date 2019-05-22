@@ -50,7 +50,10 @@ struct harddoom2 {
 
     counter batch_cnt;
 
+    spinlock_t fence_cnt_lock;
     counter last_fence_cnt;
+
+    spinlock_t fence_wait_lock;
     counter last_fence_wait;
 
     /* Used to wait for free space in the command buffer. */
@@ -262,6 +265,9 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
         DEBUG("can't init cmd_buff");
         goto out_cmd_buff;
     }
+
+    spin_lock_init(&hd2->fence_cnt_lock);
+    spin_lock_init(&hd2->fence_wait_lock);
 
     init_waitqueue_head(&hd2->write_wq);
     init_waitqueue_head(&hd2->fence_wq);
@@ -641,7 +647,7 @@ static void _update_last_fence_cnt(struct harddoom2* hd2) {
 }
 
 static void bump_fence_wait(struct harddoom2* hd2, counter cnt) {
-    /* TODO spinlock */
+    spin_lock(&hd2->fence_wait_lock);
     if (cnt < hd2->last_fence_wait) {
         goto out;
     }
@@ -650,16 +656,15 @@ static void bump_fence_wait(struct harddoom2* hd2, counter cnt) {
     hd2->last_fence_wait = cnt;
 
 out:
-    /* TODO spinunlock */
-    return;
+    spin_unlock(&hd2->fence_wait_lock);
 }
 
 static counter get_curr_fence_cnt(struct harddoom2* hd2) {
     counter res;
-    /* TODO spinlock */
+    spin_lock(&hd2->fence_cnt_lock);
     _update_last_fence_cnt(hd2);
     res = hd2->last_fence_cnt;
-    /* TODO spinunlock */
+    spin_unlock(&hd2->fence_cnt_lock);
     return res;
 }
 
@@ -681,8 +686,9 @@ void wait_for_fence_cnt(struct harddoom2* hd2, counter cnt) {
 }
 
 static void update_last_fence_cnt(struct harddoom2* hd2) {
-    /* TODO spinlock */
+    spin_lock(&hd2->fence_cnt_lock);
     _update_last_fence_cnt(hd2);
+    spin_unlock(&hd2->fence_cnt_lock);
 }
 
 static void collect_buffers(struct harddoom2* hd2) {
@@ -707,12 +713,12 @@ static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
 
 static void enable_intr(struct harddoom2* hd2, uint32_t intr) {
     /* TODO synchro */
-    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
+    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) | intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
 static void disable_intr(struct harddoom2* hd2, uint32_t intr) {
     /* TODO synchro */
-    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE)  & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
+    iowrite32(ioread32(hd2->bar + HARDDOOM2_INTR_ENABLE) & ~intr, hd2->bar + HARDDOOM2_INTR_ENABLE);
 }
 
 static void deactivate_intr(struct harddoom2* hd2, uint32_t intr) {
