@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
+#include <linux/bitmap.h>
 #include <linux/cdev.h>
 #include <linux/pci.h>
 
@@ -41,7 +42,7 @@ static struct class doom_class = {
 
 /* Represents a single device. */
 struct harddoom2 {
-    int number;
+    unsigned number;
     void __iomem* bar;
     struct pci_dev* pdev;
     struct cdev cdev;
@@ -528,16 +529,27 @@ int harddoom2_init_dma_buff(struct harddoom2* hd2, struct dma_buffer* buff, size
 }
 
 static int dev_counter = 0;
-// static DEFINE_MUTEX(dev_counter_mut);
+static DECLARE_BITMAP(dev_numbers, DEVICES_LIMIT);
+static spinlock_t dev_numbers_lock = SPIN_LOCK_UNLOCKED;
 
 static int alloc_dev_number(void) {
     int ret = -ENOSPC;
 
-    /* TODO lock */
-    if (dev_counter < DEVICES_LIMIT) {
-        ret = dev_counter++;
+    spin_lock(&dev_numbers_lock);
+    unsigned long bit = find_first_zero_bit(&dev_numbers, DEVICES_LIMIT);
+    if (bit != DEVICES_LIMIT) {
+        set_bit(bit, &dev_numbers);
+        ret = (int)bit;
     }
+    spin_unlock(&dev_numbers_lock);
     return ret;
+}
+
+static void free_dev_number(unsigned number) {
+    spin_lock(&dev_numbers_lock);
+    BUG_ON(!test_bit(number, &dev_numbers));
+    clear_bit(number, &dev_numbers);
+    spin_unlock(&dev_numbers_lock);
 }
 
 typedef void (*doom_irq_handler_t)(struct harddoom2*, uint32_t);
@@ -684,13 +696,12 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
         goto out_dma;
     }
 
-    /* TODO: free dev numbers, use list? */
     if ((err = alloc_dev_number()) < 0) {
         DEBUG("can't allocate device number");
         goto out_dma;
     }
 
-    int dev_number = err;
+    unsigned dev_number = err;
     BUG_ON(dev_number >= DEVICES_LIMIT);
 
     struct harddoom2* hd2 = &devices[dev_number];
@@ -751,7 +762,7 @@ err_irq:
     pci_set_drvdata(pdev, NULL);
     free_buffers(hd2);
 out_cmd_buff:
-    /* TODO free dev numbers */
+    free_dev_number(dev_number);
 out_dma:
     pci_clear_master(pdev);
 
@@ -770,7 +781,7 @@ static void pci_remove(struct pci_dev* pdev) {
     if (!hd2) {
         ERROR("pci_remove: no pcidata!");
     } else {
-        BUG_ON(hd2->number < 0 || hd2->number >= DEVICES_LIMIT);
+        BUG_ON(hd2->number >= DEVICES_LIMIT);
         BUG_ON(&devices[hd2->number] != hd2);
 
         bar = hd2->bar;
@@ -783,7 +794,7 @@ static void pci_remove(struct pci_dev* pdev) {
         free_buffers(hd2);
     }
 
-    /* TODO: free dev number */
+    free_dev_number(hd2->number);
     pci_clear_master(pdev);
 
     if (!bar) {
