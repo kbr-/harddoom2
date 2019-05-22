@@ -24,7 +24,7 @@ int init_dma_buff(struct dma_buffer* buff, size_t size, struct device* dev) {
     }
 
     uint32_t* page_table = buff->page_table_kern;
-    size_t num_pages = (size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE;
+    size_t num_pages = DIV_ROUND_UP(size, HARDDOOM2_PAGE_SIZE);
     BUG_ON((void*)(page_table + num_pages) - (buff->page_table_kern + HARDDOOM2_PAGE_SIZE) > 0);
 
     size_t page;
@@ -91,7 +91,7 @@ void write_dma_buff(struct dma_buffer* buff, const void* src, size_t dst_pos, si
     size -= space_in_page;
 
     while (size >= HARDDOOM2_PAGE_SIZE) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
 
         dst = buff->pages_kern[++page];
         memcpy(dst, src, HARDDOOM2_PAGE_SIZE);
@@ -100,7 +100,7 @@ void write_dma_buff(struct dma_buffer* buff, const void* src, size_t dst_pos, si
     }
 
     if (size) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
         dst = buff->pages_kern[++page];
         memcpy(dst, src, size);
     }
@@ -130,7 +130,7 @@ ssize_t write_dma_buff_user(struct dma_buffer* buff, const void __user* src, siz
     size -= space_in_page;
 
     while (size >= HARDDOOM2_PAGE_SIZE) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
 
         dst = buff->pages_kern[++page];
         left = copy_from_user(dst, src, HARDDOOM2_PAGE_SIZE);
@@ -145,7 +145,7 @@ ssize_t write_dma_buff_user(struct dma_buffer* buff, const void __user* src, siz
     }
 
     if (size) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
         dst = buff->pages_kern[++page];
         left = copy_from_user(dst, src, size);
         copied += size - left;
@@ -187,7 +187,7 @@ ssize_t read_dma_buff_user(const struct dma_buffer* buff, void __user* dst, size
     size -= space_in_page;
 
     while (size >= HARDDOOM2_PAGE_SIZE) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
 
         src = buff->pages_kern[++page];
         left = copy_to_user(dst, src, HARDDOOM2_PAGE_SIZE);
@@ -202,7 +202,7 @@ ssize_t read_dma_buff_user(const struct dma_buffer* buff, void __user* dst, size
     }
 
     if (size) {
-        BUG_ON(page >= (buff->size + HARDDOOM2_PAGE_SIZE - 1) / HARDDOOM2_PAGE_SIZE);
+        BUG_ON(page >= DIV_ROUND_UP(buff->size, HARDDOOM2_PAGE_SIZE));
 
         src = buff->pages_kern[++page];
         left = copy_to_user(dst, src, size);
