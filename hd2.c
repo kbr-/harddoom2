@@ -46,6 +46,7 @@ struct harddoom2 {
     struct pci_dev* pdev;
     struct cdev cdev;
 
+    struct mutex cmd_buff_lock;
     struct dma_buffer cmd_buff;
 
     counter batch_cnt;
@@ -272,6 +273,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
         goto out_cmd_buff;
     }
 
+    mutex_init(&hd2->cmd_buff_lock);
     spin_lock_init(&hd2->fence_cnt_lock);
     spin_lock_init(&hd2->fence_wait_lock);
     spin_lock_init(&hd2->intr_flags_lock);
@@ -741,18 +743,18 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
         const struct doomdev2_cmd* cmds, size_t num_cmds) {
     update_last_fence_cnt(hd2);
 
-    /* TODO mutex lock */
+    mutex_lock(&hd2->cmd_buff_lock);
     while (get_cmd_buf_space(hd2) < 2) {
         deactivate_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
         if (get_cmd_buf_space(hd2) >= 2) {
             break;
         }
         _enable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
-        /* TODO unlock */
+        mutex_unlock(&hd2->cmd_buff_lock);
 
         wait_event(hd2->write_wq, get_cmd_buf_space(hd2) >= 2);
 
-        /* TODO mutex lock */
+        mutex_lock(&hd2->cmd_buff_lock);
     }
 
     _disable_intr(hd2, HARDDOOM2_INTR_PONG_ASYNC);
@@ -819,12 +821,12 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     /* TODO do this outside lock? */
     collect_buffers(hd2);
 
-    /* TODO unlock */
+    mutex_unlock(&hd2->cmd_buff_lock);
 
     return num_cmds;
 
 out_setup:
-    /* TODO unlock */
+    mutex_unlock(&hd2->cmd_buff_lock);
     return set;
 }
 
