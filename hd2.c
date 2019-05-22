@@ -58,6 +58,8 @@ struct harddoom2 {
 
     spinlock_t intr_flags_lock;
 
+    spinlock_t write_idx_lock;
+
     /* Used to wait for free space in the command buffer. */
     wait_queue_head_t write_wq;
 
@@ -273,6 +275,7 @@ static int pci_probe(struct pci_dev* pdev, const struct pci_device_id* id) {
     spin_lock_init(&hd2->fence_cnt_lock);
     spin_lock_init(&hd2->fence_wait_lock);
     spin_lock_init(&hd2->intr_flags_lock);
+    spin_lock_init(&hd2->write_idx_lock);
 
     init_waitqueue_head(&hd2->write_wq);
     init_waitqueue_head(&hd2->fence_wq);
@@ -713,7 +716,9 @@ static void collect_buffers(struct harddoom2* hd2) {
 }
 
 static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
-    return ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1; /* TODO lock */
+    spin_lock(&hd2->write_idx_lock);
+    uint32_t ret = ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1;
+    spin_unlock(&hd2->write_idx_lock);
 }
 
 static void _enable_intr(struct harddoom2* hd2, uint32_t intr) {
@@ -755,7 +760,10 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
 
     uint32_t space = get_cmd_buf_space(hd2);
 
-    uint32_t write_idx = ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX); /* TODO lock */
+    spin_lock(&hd2->write_idx_lock);
+    uint32_t write_idx = ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    spin_unlock(&hd2->write_idx_lock);
+
     uint32_t extra_flags = (write_idx % PING_PERIOD) ? 0 : HARDDOOM2_CMD_FLAG_PING_ASYNC;
 
     int set = update_buffers(hd2, bufs);
@@ -790,8 +798,11 @@ ssize_t harddoom2_write(struct harddoom2* hd2, struct hd2_buffer* bufs[NUM_USER_
     write_cmd(hd2, &dev_cmd, write_idx);
 
     write_idx = (write_idx + 1) % CMD_BUF_LEN;
-    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX); /* TODO lock */
     ++hd2->batch_cnt;
+
+    spin_lock(&hd2->write_idx_lock);
+    iowrite32(write_idx, hd2->bar + HARDDOOM2_CMD_WRITE_IDX);
+    spin_unlock(&hd2->write_idx_lock);
 
     set_last_write(hd2->curr_bufs[DST_BUF_IDX], hd2->batch_cnt);
 
