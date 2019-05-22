@@ -719,6 +719,7 @@ static uint32_t get_cmd_buf_space(struct harddoom2* hd2) {
     spin_lock(&hd2->write_idx_lock);
     uint32_t ret = ioread32(hd2->bar + HARDDOOM2_CMD_READ_IDX) - ioread32(hd2->bar + HARDDOOM2_CMD_WRITE_IDX) - 1;
     spin_unlock(&hd2->write_idx_lock);
+    return ret;
 }
 
 static void _enable_intr(struct harddoom2* hd2, uint32_t intr) {
