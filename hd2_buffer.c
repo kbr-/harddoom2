@@ -39,6 +39,7 @@ struct hd2_buffer {
 };
 
 static void do_hd2_buff_release(struct kref* kref) {
+    DEBUG("do_hd2_buff_release");
     struct hd2_buffer* buff = container_of(kref, struct hd2_buffer, kref);
     free_dma_buff(&buff->dma_buff);
     kfree(buff);
