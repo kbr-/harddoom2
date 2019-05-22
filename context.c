@@ -48,7 +48,6 @@ static struct context* get_ctx(struct file* file) {
 
 static int context_open(struct inode* inode, struct file* file) {
     unsigned number = MINOR(inode->i_rdev);
-    BUG_ON(number >= 256);
 
     struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {

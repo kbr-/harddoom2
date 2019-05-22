@@ -44,24 +44,33 @@ static struct class doom_class = {
 
 /* Represents a single device. */
 struct harddoom2 {
+    /* The number of this device, between 0 and 255. */
     unsigned number;
+
     void __iomem* bar;
     struct pci_dev* pdev;
     struct cdev cdev;
 
+    /* The command buffer. */
     struct mutex cmd_buff_lock;
     struct dma_buffer cmd_buff;
 
+    /* Number of command batches sent by the user (i.e., number of successful harddoom2_write calls).
+       The last command in each batch is sent with a FENCE flag. */
     counter batch_cnt;
 
+    /* Last known value of the FENCE_COUNTER register expanded to 64 bits, frequently updated. */
     spinlock_t fence_cnt_lock;
     counter last_fence_cnt;
 
+    /* Last set value of the FENCE_WAIT register expanded to 64 bits. */
     spinlock_t fence_wait_lock;
     counter last_fence_wait;
 
+    /* Used to protect access to the active interrupts register, which might be read concurrently. */
     spinlock_t intr_flags_lock;
 
+    /* Used to protect access to the WRITE_IDX register. */
     spinlock_t write_idx_lock;
 
     /* Used to wait for free space in the command buffer. */
