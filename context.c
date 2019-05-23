@@ -401,6 +401,7 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
 
         /* The whole batch was successfuly written. */
         num_cmds -= num_batch;
+        _buf += num_batch * sizeof(struct doomdev2_cmd);
     }
 
 out_surf:
