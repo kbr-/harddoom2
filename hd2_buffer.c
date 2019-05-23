@@ -274,7 +274,7 @@ void interlock(struct hd2_buffer* buff) {
     buff->interlocked = true;
 }
 
-bool assigned_to(const struct hd2_buffer* buff, const struct hd2* hd2) {
+bool assigned_to(const struct hd2_buffer* buff, const struct harddoom2* hd2) {
     return buff->hd2 == hd2;
 }
 

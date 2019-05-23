@@ -32,7 +32,7 @@ MODULE_LICENSE("GPL");
 
 #define PING_PERIOD 2048
 
-_Static_assert(PING_PERIOD <= CMD_BUF_LEN / 2, "ping perdiod")
+_Static_assert(PING_PERIOD <= CMD_BUF_LEN / 2, "ping period");
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },
