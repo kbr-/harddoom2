@@ -274,6 +274,10 @@ void interlock(struct hd2_buffer* buff) {
     buff->interlocked = true;
 }
 
+bool assigned_to(const struct hd2_buffer* buff, const struct hd2* hd2) {
+    return buff->hd2 == hd2;
+}
+
 struct hd2_buffer* hd2_buff_fd_get(int fd) {
     struct file* f = fget(fd);
     if (!f) {

@@ -16,8 +16,6 @@
 MODULE_LICENSE("GPL");
 
 #define CHRDEV_PREFIX "doom"
-#define DEVICES_LIMIT 256
-#define PING_PERIOD 2048
 #define HARDDOOM2_ADDR_SIZE 40
 #define NUM_INTR_BITS 15
 
@@ -31,6 +29,10 @@ MODULE_LICENSE("GPL");
 
 /* 128K commands */
 #define CMD_BUF_LEN (CMD_BUF_SIZE / CMD_SEND_BYTES)
+
+#define PING_PERIOD 2048
+
+_Static_assert(PING_PERIOD <= CMD_BUF_LEN / 2, "ping perdiod")
 
 static const struct pci_device_id pci_ids[] = {
     { PCI_DEVICE(HARDDOOM2_VENDOR_ID, HARDDOOM2_DEVICE_ID), },

@@ -36,6 +36,8 @@ void set_last_write(struct hd2_buffer*, counter cnt);
 bool interlocked(const struct hd2_buffer*);
 void interlock(struct hd2_buffer*);
 
+bool assigned_to(const struct hd2_buffer*, const struct hd2*);
+
 struct hd2_buffer* hd2_buff_fd_get(int fd);
 void hd2_buff_get(struct hd2_buffer*);
 void hd2_buff_put(struct hd2_buffer*);

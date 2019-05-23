@@ -10,46 +10,29 @@
 
 #include "context.h"
 
-/* Maximum number of commands processed in a single write. */
-#define MAX_CMDS 1024
+/* Maximum number of commands sent to the device in a batch. */
+#define MAX_BATCH_CMDS 1024
 
-static int context_open(struct inode* inode, struct file* file);
-static int context_release(struct inode* inode, struct file* file);
-static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg);
-static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off);
+#define SSIZE_MAX LONG_MAX
+_Static_assert(sizeof(ssize_t) == sizeof(long), "ssize_t");
 
-const struct file_operations _context_ops = {
-    .owner = THIS_MODULE,
-    .open = context_open,
-    .release = context_release,
-    .unlocked_ioctl = context_ioctl,
-    .compat_ioctl = context_ioctl,
-    .write = context_write
-};
-
-const struct file_operations* const context_ops = &_context_ops;
+/* Since we return the number of written bytes in context_write using a ssize_t,
+   we can only write as many bytes as ssize_t can hold. */
+#define MAX_CMDS (SSIZE_MAX / sizeof(struct doomdev2_cmd))
 
 struct context {
     struct harddoom2* hd2;
     struct hd2_buffer* curr_bufs[NUM_USER_BUFS];
-    struct doomdev2_cmd cmds[MAX_CMDS];
+    struct doomdev2_cmd cmds[MAX_BATCH_CMDS];
     struct mutex mut;
 };
 
-static struct context* get_ctx(struct file* file) {
-    BUG_ON(!file);
-    BUG_ON(!file->private_data);
-    BUG_ON(file->f_op != context_ops);
-
-    struct context* ctx = (struct context*)file->private_data;
-
-    BUG_ON(!ctx->hd2);
-
-    return ctx;
-}
-
 static int context_open(struct inode* inode, struct file* file) {
     unsigned number = MINOR(inode->i_rdev);
+    if (number >= DEVICES_LIMIT) {
+        DEBUG("invalid minor");
+        return -EINVAL;
+    }
 
     struct context* ctx = kzalloc(sizeof(struct context), GFP_KERNEL);
     if (!ctx) {
@@ -66,7 +49,7 @@ static int context_open(struct inode* inode, struct file* file) {
 }
 
 static int context_release(struct inode* inode, struct file* file) {
-    struct context* ctx = get_ctx(file);
+    struct context* ctx = (struct context*)file->private_data;
 
     release_user_bufs(ctx->curr_bufs);
 
@@ -119,6 +102,14 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
             goto out_fds;
         }
     }
+    for (j = 0; i < NUM_USER_BUFS; ++j) {
+        if (!bufs[j]) continue;
+
+        if (!assigned_to(bufs[j], ctx->hd2)) {
+            DEBUG("setup: wrong device");
+            goto out_fds;
+        }
+    }
     if (bufs[DST_BUF_IDX] && bufs[SRC_BUF_IDX] &&
             (get_buff_width(bufs[DST_BUF_IDX]) != get_buff_width(bufs[SRC_BUF_IDX]) ||
              get_buff_height(bufs[DST_BUF_IDX]) != get_buff_height(bufs[SRC_BUF_IDX]))) {
@@ -161,7 +152,7 @@ out_fds:
 }
 
 static long context_ioctl(struct file* file, unsigned cmd, unsigned long arg) {
-    struct context* ctx = get_ctx(file);
+    struct context* ctx = (struct context*)file->private_data;
 
     switch (cmd) {
     case DOOMDEV2_IOCTL_CREATE_SURFACE:
@@ -345,7 +336,6 @@ static bool validate_cmd(struct context* ctx, const struct doomdev2_cmd* user_cm
 }
 
 static ssize_t context_write(struct file* file, const char __user* _buf, size_t count, loff_t* off) {
-    ssize_t err;
 
     if (!count || count % sizeof(struct doomdev2_cmd) != 0) {
         DEBUG("context_write: wrong count %lu", count);
@@ -357,7 +347,10 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         num_cmds = MAX_CMDS;
     }
 
-    struct context* ctx = get_ctx(file);
+    struct context* ctx = (struct context*)file->private_data;
+
+    int err = 0;
+    size_t cmds_written = 0;
 
     mutex_lock(&ctx->mut);
     if (!ctx->curr_bufs[DST_BUF_IDX]) {
@@ -366,34 +359,68 @@ static ssize_t context_write(struct file* file, const char __user* _buf, size_t 
         goto out_surf;
     }
 
-    if (copy_from_user(ctx->cmds, _buf, num_cmds * sizeof(struct doomdev2_cmd))) {
-        DEBUG("context_write: copy from user fail");
-        err = -EFAULT;
-        goto out_surf;
-    }
+    size_t num_batch = MAX_BATCH_CMDS;
+    while (num_cmds) {
+        if (num_batch > num_cmds) {
+            /* Last batch. */
+            num_batch = num_cmds;
+        }
 
-    size_t it;
-    for (it = 0; it < num_cmds; ++it) {
-        if (!validate_cmd(ctx, &ctx->cmds[it])) {
+        if (copy_from_user(ctx->cmds, _buf, num_batch * sizeof(struct doomdev2_cmd))) {
+            DEBUG("context_write: copy from user fail");
+            err = -EFAULT;
+            break;
+        }
+
+        size_t it;
+        for (it = 0; it < num_batch; ++it) {
+            if (!validate_cmd(ctx, &ctx->cmds[it])) {
+                break;
+            }
+        }
+
+        if (!it) {
+            /* The first command in this batch was invalid. */
             err = -EINVAL;
             break;
         }
-    }
 
-    if (!it) {
-        /* The first command was invalid, return error */
-        DEBUG("write: first command invalid");
-        goto out_surf;
-    }
+        err = harddoom2_write(ctx->hd2, ctx->curr_bufs, ctx->cmds, it);
 
-    num_cmds = it;
-    err = harddoom2_write(ctx->hd2, ctx->curr_bufs, ctx->cmds, num_cmds);
-    BUG_ON(!err || err > num_cmds);
-    if (err > 0) {
-        err *= sizeof(struct doomdev2_cmd);
+        if (err < 0) {
+            break;
+        }
+
+        BUG_ON(!err || err > it);
+        cmds_written += err;
+
+        if (it < num_batch) {
+            /* One of the middle commands was invalid. */
+            break;
+        }
+
+        /* The whole batch was successfuly written. */
+        num_cmds -= num_batch;
     }
 
 out_surf:
     mutex_unlock(&ctx->mut);
-    return err;
+
+    if (cmds_written) {
+        return cmds_written * sizeof(struct doomdev2_cmd);
+    } else {
+        BUG_ON(!err);
+        return err;
+    }
 }
+
+const struct file_operations _context_ops = {
+    .owner = THIS_MODULE,
+    .open = context_open,
+    .release = context_release,
+    .unlocked_ioctl = context_ioctl,
+    .compat_ioctl = context_ioctl,
+    .write = context_write
+};
+
+const struct file_operations* const context_ops = &_context_ops;
