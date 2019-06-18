@@ -1,3 +1,7 @@
+Assignment: http://students.mimuw.edu.pl/ZSO/PUBLIC-SO/2018-2019/z2_driver/index.html
+Device implementation in QEMU: https://github.com/koriakin/qemu/tree/harddoom2
+Modified Doom using the driver: https://github.com/koriakin/prboom-plus/tree/doomdev2
+
 Dostarczone rozwiązanie jest w pełni asynchroniczne -- wykorzystuje blok wczytywania poleceń, wysyłanie poleceń przez użytkownika nie wymaga czekania na wykonanie poprzednich. Czytanie z/pisanie do buforów przez użytkownika wykorzystuje mechanizm FENCE_WAIT do czekania na urządzenie.
 
 W plikach dma_buffer.h i dma_buffer.c znajduje się definicja "surowego" bufora wykorzystującego pamięć DMA do komunikacji z urządzeniem wraz z algorytmami kopiowania danych między takim buforem a zwykłym buforem w pamięci RAM.
