@@ -102,7 +102,7 @@ static int setup(struct context* ctx, struct doomdev2_ioctl_setup __user* _param
             goto out_fds;
         }
     }
-    for (j = 0; i < NUM_USER_BUFS; ++j) {
+    for (j = 0; j < NUM_USER_BUFS; ++j) {
         if (!bufs[j]) continue;
 
         if (!assigned_to(bufs[j], ctx->hd2)) {
